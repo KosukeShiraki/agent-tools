@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<title>{デッキ名}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --paper:#ffffff;
+  --navy:#12395b; --navy-d:#0b2740; --navy-t:#eaf0f6; --navy-m:#8397ab;
+  --acc:#9a2b32; --acc-t:#f8efef;
+  --ink:#1f2a33; --ink2:#41505e; --ink3:#5e6c79; --ink4:#8d98a3;
+  --rule:#bfc9d4; --hair:#dee5ec;
+  --fill:#f1f4f8; --fill2:#e2e9f0;
+  --surround:#d3d9df;
+  --jp:"Noto Sans JP","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
+  --ui:"IBM Plex Sans","Noto Sans JP",sans-serif;
+  --s:1;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--surround:#12181e}}
+:root[data-theme="dark"]{--surround:#12181e}
+body{background:var(--surround);font-family:var(--jp);color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"palt" 1}
+.deck{padding:26px 12px 52px}
+.sheet{width:calc(1280px*var(--s));height:calc(720px*var(--s));margin:0 auto 20px}
+.page{width:1280px;height:720px;transform:scale(var(--s));transform-origin:top left;background:var(--paper);border:1px solid var(--hair);border-top:3px solid var(--navy);padding:46px 52px 34px;display:flex;flex-direction:column;position:relative;overflow:hidden}
+
+/* ---- 4層構造 ---- */
+.ttl{font-size:25px;font-weight:700;line-height:1.38;letter-spacing:.004em;text-wrap:balance;color:var(--navy-d)}
+.hr{height:1px;background:var(--navy-d);margin-top:13px}
+.lead{margin-top:15px;font-size:12.5px;line-height:1.9;color:var(--ink2);max-width:1020px}
+.lead b{font-weight:700;color:var(--ink)}
+.fig{flex:1;min-height:0;margin:24px 0 18px;display:flex;flex-direction:column;justify-content:center}
+.bl{flex:none;background:var(--fill);border-left:3px solid var(--acc);padding:12px 18px;display:flex;align-items:baseline;gap:16px}
+.bl .k{font-family:var(--ui);font-size:9px;letter-spacing:.16em;color:var(--ink4);font-weight:600;white-space:nowrap}
+.bl .m{font-size:13.5px;font-weight:700;line-height:1.6}
+.pn,.brand{position:absolute;bottom:12px;font-family:var(--ui);font-size:9.5px;color:var(--ink4);letter-spacing:.09em;font-variant-numeric:tabular-nums}
+.pn{right:52px}.brand{left:52px}
+
+/* ---- 部品 ---- */
+.bx{border:1px solid var(--rule);background:#fff;padding:13px 16px}
+.bx.s{border:2px solid var(--navy)}
+.bx.g{background:var(--fill);border-color:var(--fill2)}
+.bx.d{background:var(--navy);border-color:var(--navy);color:#fff}
+.bx.d .tx{color:#c9ccd1}
+.h4{font-size:14px;font-weight:700;line-height:1.45;color:var(--navy-d)}
+.h5{font-size:12.5px;font-weight:700;line-height:1.55;color:var(--navy-d)}
+.tx{font-size:11px;line-height:1.7;color:var(--ink3);margin-top:6px}
+.kk{font-family:var(--ui);font-size:9px;font-weight:600;letter-spacing:.14em;color:var(--ink4)}
+.nt{font-size:10px;line-height:1.66;color:#818890}
+.num{font-family:var(--ui);font-variant-numeric:tabular-nums}
+b.key{font-weight:700;color:var(--ink)}
+
+/* ---- 矢印 ---- */
+.ar{width:40px;height:0;border-top:1px solid var(--navy);position:relative;flex:none;align-self:center}
+.ar::after{content:"";position:absolute;top:-4px;right:-1px;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:9px solid var(--navy)}
+.ar.thin{border-top-color:var(--rule)}
+.ar.thin::after{border-left-color:var(--rule)}
+.ard{width:0;height:26px;border-left:1px solid var(--navy);position:relative;margin:0 auto;flex:none}
+.ard::after{content:"";position:absolute;left:-4px;bottom:-1px;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:9px solid var(--navy)}
+
+/* ---- 表紙 ---- */
+.cover{justify-content:center;padding:0 96px}
+.cover .cap{font-family:var(--ui);font-size:10px;letter-spacing:.2em;color:var(--ink4);font-weight:600}
+.cover h1{font-size:40px;font-weight:700;line-height:1.4;margin-top:24px;letter-spacing:.01em;color:var(--navy-d)}
+.cover .sub{font-size:14px;line-height:1.9;color:var(--ink2);margin-top:22px;max-width:760px}
+.cover .cline{height:3px;background:var(--acc);width:120px;margin:36px 0 28px}
+.cover dl{display:flex;gap:56px}
+.cover dt{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;margin-bottom:6px}
+.cover dd{font-size:12px;color:var(--ink2);line-height:1.7}
+
+/* ---- P2 サマリー ---- */
+.qa{display:grid;grid-template-columns:44px 350px 40px 1fr 78px;align-items:stretch;row-gap:20px;column-gap:0}
+.qa .hd2{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--hair)}
+.qa .qn{font-family:var(--ui);font-size:20px;color:var(--navy-m);font-weight:500;display:flex;align-items:center}
+.qa .ref{font-family:var(--ui);font-size:10px;color:var(--ink4);display:flex;align-items:center;justify-content:flex-end;font-variant-numeric:tabular-nums}
+
+/* ---- P3 因果 ---- */
+.cz{display:grid;grid-template-columns:322px 44px 316px 44px 1fr;column-gap:0;align-items:center}
+.cz .col{display:flex;flex-direction:column;gap:14px}
+.czh{display:grid;grid-template-columns:322px 44px 316px 44px 1fr;margin-bottom:14px}
+.czh span{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:7px;border-bottom:1px solid var(--hair)}
+.czh span.gap{border:0}
+
+/* ---- P4 ツリー ---- */
+.tree{display:flex;flex-direction:column;align-items:center}
+.tcols{display:grid;grid-template-columns:repeat(3,376px);column-gap:24px;width:1176px}
+.tcols .lst{margin-top:12px;display:flex;flex-direction:column;gap:7px}
+.tcols .lst div{font-size:10.5px;line-height:1.6;color:var(--ink3);padding-left:12px;position:relative}
+.tcols .lst div::before{content:"";position:absolute;left:0;top:8px;width:5px;height:1px;background:var(--ink4)}
+
+/* ---- P5 分解 ---- */
+.flow3{display:grid;grid-template-columns:1fr 40px 1fr 40px 1fr;align-items:center;margin-bottom:26px}
+.wf{display:flex;align-items:stretch;gap:0}
+.wf .cell{flex:1;text-align:center}
+.wf .cap{font-size:10.5px;color:var(--ink3);min-height:34px;display:flex;align-items:center;justify-content:center;line-height:1.4}
+.wf .val{border:1px solid var(--rule);padding:13px 6px;font-family:var(--ui);font-size:17px;font-weight:600;font-variant-numeric:tabular-nums}
+.wf .val.up{background:var(--acc);color:#fff;border-color:var(--acc)}
+.wf .val.dn{background:#fff;color:var(--navy);border-color:var(--navy)}
+.wf .val.anchor{border:2px solid var(--navy);background:var(--navy-t);color:var(--navy-d)}
+.wf .op{width:26px;display:flex;align-items:center;justify-content:center;font-family:var(--ui);font-size:14px;color:var(--ink3);padding-top:30px}
+.lg{display:flex;gap:20px;margin-top:14px;align-items:center}
+.lg i{display:inline-block;width:16px;height:9px;margin-right:6px;vertical-align:middle}
+.lg i.a{background:var(--acc)}
+.lg i.b{background:#fff;border:1px solid var(--navy)}
+
+/* ---- P6 2軸 ---- */
+.mx{display:grid;grid-template-columns:26px 1fr 366px;column-gap:34px}
+.vax{position:relative;display:flex;align-items:center;justify-content:center}
+.vax .vt{writing-mode:vertical-rl;font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--ink2)}
+.g4{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;min-height:284px}
+.g4 .cell{border:1px solid var(--rule);padding:14px 16px;margin:-0.5px}
+.g4 .cell.on{border:2px solid var(--acc);margin:-1px;z-index:1;background:var(--navy-t)}
+.axl{display:flex;justify-content:space-between;font-family:var(--ui);font-size:9.5px;letter-spacing:.1em;color:var(--ink4);font-weight:600;padding:0 2px}
+.hax{display:flex;align-items:center;gap:10px;margin-top:10px}
+.hax .ln{flex:1;height:0;border-top:1px solid var(--rule);position:relative}
+.hax .ln::before,.hax .ln::after{content:"";position:absolute;top:-3.5px;width:0;height:0;border-top:3.5px solid transparent;border-bottom:3.5px solid transparent}
+.hax .ln::before{left:-1px;border-right:8px solid var(--rule)}
+.hax .ln::after{right:-1px;border-left:8px solid var(--rule)}
+.hax span{font-size:10.5px;font-weight:700;color:var(--ink2)}
+.side{display:flex;flex-direction:column;gap:0;border-top:1px solid var(--ink)}
+.side .it{padding:13px 0;border-bottom:1px solid var(--hair)}
+.side .it:last-child{border-bottom:0}
+
+/* ---- P7 転換 ---- */
+.ba{display:grid;grid-template-columns:36px 1fr 44px 1fr;row-gap:14px;align-items:stretch}
+.ba .hd2{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--hair)}
+.ba .no{font-family:var(--ui);font-size:11px;color:var(--navy-m);display:flex;align-items:center;font-variant-numeric:tabular-nums}
+.ba .l{background:var(--fill);border:1px solid var(--fill2);padding:11px 14px;display:flex;align-items:center;font-size:12.5px;line-height:1.5;color:var(--ink3)}
+.ba .r{background:#fff;border:1px solid var(--navy);padding:11px 14px;display:flex;align-items:center;font-size:12.5px;font-weight:700;line-height:1.5;color:var(--navy-d)}
+
+/* ---- P8 プロセス ---- */
+.pr{display:grid;grid-template-columns:86px 1fr;column-gap:16px;row-gap:0;align-items:stretch}
+.pr .rl{font-family:var(--ui);font-size:9px;letter-spacing:.13em;color:var(--ink4);font-weight:600;display:flex;align-items:center}
+.pcols{display:grid;grid-template-columns:repeat(4,1fr);column-gap:30px;position:relative}
+.pcols .st{border:1px solid var(--navy);padding:12px 14px;position:relative}
+.pcols .st .kk{margin-bottom:6px;display:block}
+.pcols .st::after{content:"";position:absolute;right:-30px;top:50%;width:30px;height:0;border-top:1px solid var(--navy)}
+.pcols .st:last-child::after{display:none}
+.pcols .st .tip{position:absolute;right:-9px;top:calc(50% - 4px);width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:9px solid var(--navy)}
+.pcols .st:last-child .tip{display:none}
+.drops{display:grid;grid-template-columns:repeat(4,1fr);column-gap:30px;height:26px}
+.tl{display:grid;grid-template-columns:repeat(4,1fr);column-gap:30px}
+.tl .seg{border-top:2px solid var(--navy);padding-top:7px;font-family:var(--ui);font-size:10px;color:var(--ink3);font-variant-numeric:tabular-nums}
+
+/* ---- P9 課題→対応→効果 ---- */
+.cae{display:grid;grid-template-columns:28px 330px 40px 396px 40px 1fr;row-gap:16px;align-items:stretch}
+.cae .hd2{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--hair)}
+.cae .no{font-family:var(--ui);font-size:11px;color:var(--navy-m);display:flex;align-items:center;font-variant-numeric:tabular-nums}
+.cae .c{display:flex;flex-direction:column;justify-content:center}
+
+/* ---- P10 意思決定 ---- */
+.dec{display:grid;grid-template-columns:566px 1fr;column-gap:40px}
+.dec .list{display:flex;flex-direction:column;gap:14px}
+.gantt{border-top:1px solid var(--navy)}
+.gantt .mh{display:grid;grid-template-columns:172px repeat(3,1fr);border-bottom:1px solid var(--hair)}
+.gantt .mh span{font-family:var(--ui);font-size:9.5px;letter-spacing:.1em;color:var(--ink4);font-weight:600;padding:7px 0 7px 9px;border-left:1px solid var(--hair)}
+.gantt .mh span:first-child{border-left:0;padding-left:0}
+.grow{display:grid;grid-template-columns:172px 1fr;height:36px;border-bottom:1px solid var(--hair);align-items:center}
+.grow .lbl{font-size:10.5px;line-height:1.4;color:var(--ink2);padding-right:12px}
+.grow .track{position:relative;height:100%}
+.grow .bar{position:absolute;top:50%;margin-top:-3.5px;height:7px;background:var(--navy)}
+.grow .bar.lt{background:var(--rule)}
+.gmark{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--acc);z-index:3}
+.gwrap{position:relative;padding-top:19px}
+.gnote{margin-top:9px;font-family:var(--ui);font-size:9.5px;color:var(--ink2);font-weight:600;letter-spacing:.06em}
+
+/* ---- 複数案の比較（比較表＋ハーヴェイボール） ---- */
+.cmp{border-top:1px solid var(--navy)}
+.cmp .r{display:grid;grid-template-columns:228px repeat(3,1fr);border-bottom:1px solid var(--hair)}
+.cmp .r>*{padding:13px 15px}
+.cmp.c2 .r{grid-template-columns:228px repeat(2,1fr)}
+.cmp.c4 .r{grid-template-columns:228px repeat(4,1fr)}
+.cmp .hd{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600}
+.cmp .opt{font-size:12.5px;font-weight:700;color:var(--navy-d)}
+.cmp .ax{font-size:11.5px;font-weight:700;color:var(--navy-d)}
+.cmp .cel{font-size:11px;line-height:1.6;color:var(--ink3);display:flex;gap:9px;align-items:flex-start}
+.cmp .on{background:var(--navy-t)}
+.cmp .r.head .on{border-top:2px solid var(--acc);padding-top:11px}
+.hb{flex:none;width:13px;height:13px;border:1px solid var(--navy);border-radius:50%;position:relative;overflow:hidden;margin-top:1px}
+.hb.f{background:var(--navy)}
+.hb.h::before{content:"";position:absolute;left:0;top:0;width:50%;height:100%;background:var(--navy)}
+.chip{display:inline-block;align-self:flex-start;font-family:var(--ui);font-size:9px;font-weight:600;letter-spacing:.1em;padding:2px 7px;border:1px solid var(--navy);color:var(--navy)}
+.chip.f{background:var(--navy);color:#fff}
+.chip.a{border-color:var(--acc);color:var(--acc)}
+
+/* ---- 循環（複数要素の因果関係） ---- */
+.loop{display:flex;align-items:stretch;width:1176px;margin:0 auto}
+.loop .bx{flex:1}
+
+/* ---- 階層（上位概念 → 下位概念） ---- */
+.lay{display:grid;grid-template-columns:112px 1fr;column-gap:16px;align-items:center}
+.lay .lb{font-family:var(--ui);font-size:9px;letter-spacing:.13em;color:var(--ink4);font-weight:600;text-align:right;line-height:1.5}
+.lay .band{border:1px solid var(--rule);display:grid}
+.lay .band.s{border:2px solid var(--navy)}
+.lay .band>div{padding:12px 15px;border-left:1px solid var(--hair)}
+.lay .band>div:first-child{border-left:0}
+.lay .ldrop{display:flex;justify-content:center;padding:5px 0}
+
+/* ---- 中央から展開（ハブ＆スポーク） ---- */
+.hub{position:relative;width:1176px;height:340px;margin:0 auto}
+.hub svg{position:absolute;left:0;top:0}
+.hub .node{position:absolute}
+
+/* ---- 収束（複数要因 → 1つの結論） ---- */
+.conv{display:flex;align-items:center;width:1176px;margin:0 auto}
+.conv .src{width:392px;display:flex;flex-direction:column;gap:14px}
+.conv .src .bx{height:76px;display:flex;flex-direction:column;justify-content:center}
+.conv svg{flex:none}
+.conv .dst{flex:1}
+
+/* ---- 定量チャート（推移・棒） ---- */
+.chart{width:1176px;margin:0 auto}
+.chart svg{display:block}
+.chart text{font-family:var(--jp)}
+.chart .g{stroke:var(--hair);stroke-width:1}
+.chart .ax{stroke:var(--rule);stroke-width:1}
+.chart .tk{font-family:var(--ui);font-size:9.5px;fill:var(--ink4)}
+.chart .xl{font-family:var(--ui);font-size:10px;fill:var(--ink3)}
+.chart .vl{font-family:var(--ui);font-size:10.5px;font-weight:600;fill:var(--navy-d)}
+.chart .vl.on{fill:var(--acc)}
+.chart .ser{fill:none;stroke:var(--navy);stroke-width:2}
+.chart .dot{fill:#fff;stroke:var(--navy);stroke-width:2}
+.chart .dot.on{fill:var(--acc);stroke:var(--acc)}
+.chart .bar{fill:var(--navy)}
+.chart .bar.on{fill:var(--acc)}
+.chart .mk{stroke:var(--acc);stroke-width:1;stroke-dasharray:3 3}
+.chart .mkl{font-family:var(--ui);font-size:9.5px;font-weight:600;fill:var(--acc)}
+
+/* ---- 構成比（100%積み上げ帯） ---- */
+.stkw{width:1176px;margin:0 auto}
+.stkr{display:grid;grid-template-columns:118px 1fr;align-items:center;column-gap:16px;margin-bottom:14px}
+.stkr .lb{font-size:11.5px;font-weight:700;color:var(--navy-d);text-align:right}
+.stk{display:flex;height:40px}
+.stk .sg{display:flex;align-items:center;justify-content:center;font-family:var(--ui);font-size:10px;font-weight:600;color:#fff;border-right:1px solid #fff;overflow:hidden;white-space:nowrap}
+.stk .sg:last-child{border-right:0}
+.stk .s1{background:var(--navy)}
+.stk .s2{background:#3d6389}
+.stk .s3{background:#7f9ab2}
+.stk .s4{background:#b9c7d5;color:var(--ink)}
+.stk .s5{background:var(--fill2);color:var(--ink2)}
+.stk .sa{background:var(--acc)}
+.lgd{display:flex;gap:20px;justify-content:flex-end;margin-top:6px}
+.lgd span{font-size:10px;color:var(--ink3);display:flex;align-items:center;gap:7px}
+.lgd i{width:14px;height:9px;display:inline-block}
+
+/* ---- KPIツリー（数式分解） ---- */
+.kpi{width:1176px;margin:0 auto}
+.kpi .lv{display:flex;align-items:stretch}
+.kpi .lv .bx{flex:1}
+.kpi .op{width:46px;flex:none;display:flex;align-items:center;justify-content:center;font-family:var(--ui);font-size:19px;color:var(--ink3)}
+.kpi .val{font-family:var(--ui);font-size:15px;font-weight:600;color:var(--navy-d);margin-top:6px;font-variant-numeric:tabular-nums}
+.kpi .val.on{color:var(--acc)}
+
+/* ---- 業務フロー（スイムレーン） ---- */
+.swim{position:relative;width:1176px;margin:0 auto}
+.swim .grid{display:grid;grid-template-columns:118px repeat(5,1fr);border-top:1px solid var(--navy)}
+.swim .hd{font-family:var(--ui);font-size:9px;letter-spacing:.12em;color:var(--ink4);font-weight:600;height:30px;display:flex;align-items:flex-end;padding:0 0 8px 20px;border-left:1px solid var(--hair)}
+.swim .hd.c0{border-left:0;padding-left:0}
+.swim .ln{font-family:var(--ui);font-size:9.5px;letter-spacing:.08em;color:var(--ink4);font-weight:600;display:flex;align-items:center;justify-content:flex-end;padding-right:12px;border-top:1px solid var(--hair);height:78px}
+.swim .cl{border-top:1px solid var(--hair);border-left:1px solid var(--hair);height:78px;display:flex;align-items:center;padding:0 20px}
+.swim .st{border:1px solid var(--navy);background:#fff;padding:9px 11px;font-size:11px;font-weight:700;color:var(--navy-d);line-height:1.4;width:100%}
+.swim .st.acc{border:2px solid var(--acc)}
+.swim .st .sb{display:block;font-size:9.5px;font-weight:400;color:var(--ink3);margin-top:3px}
+.swim .ov{position:absolute;left:0;top:0;pointer-events:none}
+
+/* ---- シナリオ（比較表の拡張） ---- */
+.cmp .r.sec{border-bottom:1px solid var(--navy);grid-template-columns:1fr}
+.cmp .r.sec>*{padding:14px 0 5px}
+.cmp .sub{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--navy);font-weight:600}
+
+/* ---- ロードマップ（ワークストリーム × フェーズ） ---- */
+.rm{width:1176px;margin:0 auto;border-top:1px solid var(--navy)}
+.rm .mh{display:grid;grid-template-columns:158px repeat(4,1fr);border-bottom:1px solid var(--hair)}
+.rm .mh span{font-family:var(--ui);font-size:9.5px;letter-spacing:.1em;color:var(--ink4);font-weight:600;padding:8px 0 8px 10px;border-left:1px solid var(--hair)}
+.rm .mh span:first-child{border-left:0;padding-left:0}
+.rm .row{display:grid;grid-template-columns:158px 1fr;border-bottom:1px solid var(--hair);align-items:center;height:62px}
+.rm .ws{font-size:11.5px;font-weight:700;color:var(--navy-d);padding-right:14px;line-height:1.4}
+.rm .track{position:relative;height:100%}
+.rm .bar{position:absolute;top:50%;margin-top:-13px;height:26px;background:var(--navy-t);border-left:3px solid var(--navy);display:flex;align-items:center;padding-left:10px;font-size:10.5px;color:var(--navy-d);white-space:nowrap;overflow:hidden}
+.rm .bar.lt{background:var(--fill);border-left-color:var(--rule);color:var(--ink3)}
+.rm .ms{position:absolute;top:50%;width:11px;height:11px;margin:-6px 0 0 -6px;background:var(--acc);transform:rotate(45deg)}
+.rm .msl{position:absolute;top:50%;margin-top:-7px;font-family:var(--ui);font-size:9px;font-weight:600;color:var(--acc);white-space:nowrap}
+.rm .gl{position:absolute;top:0;bottom:0;border-left:1px solid var(--hair)}
+
+@media print{
+  body{background:#fff}
+  .deck{padding:0}
+  .sheet{width:1280px;height:720px;margin:0;page-break-after:always}
+  .page{transform:none;border:0}
+  @page{size:1280px 720px;margin:0}
+}
+</style>
+<div class="deck">
+
+<!-- ============ 表紙 ============ -->
+<div class="sheet"><section class="page cover">
+  <div class="cap">{英字ラベル} / {資料の位置づけ}</div>
+  <h1>{結論が伝わる主タイトル}<br>{2行目}</h1>
+  <p class="sub">{1〜2行の要約}。<br>{最重要の論点}が<b>{キーワード}</b>である。</p>
+  <div class="cline"></div>
+  <dl>
+    <div><dt>対象</dt><dd>{読者}</dd></div>
+    <div><dt>目的</dt><dd>{相手にしてほしい判断・行動}</dd></div>
+    <div><dt>構成</dt><dd>全{N}ページ</dd></div>
+    <div><dt>作成</dt><dd>{YYYY年M月}</dd></div>
+  </dl>
+  <div class="brand">{フッター識別名}</div><div class="pn">01 / {N}</div>
+</section></div>
+
+<!-- ============ 本文ページの雛形（4層構造は厳守） ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">{テーマではなく結論を書く}</h2>
+  <div class="hr"></div>
+  <p class="lead">{背景・問題意識・このページを見るための前提を2〜4行}。強調は<b>キーワードのみ</b>に限る。</p>
+  <div class="fig">
+    <!-- references/layouts.md から最適な図解パターンを1つ選んで配置する -->
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">{このページから何が言えるかを1文で}</p></div>
+  <div class="brand">{フッター識別名}</div><div class="pn">02 / {N}</div>
+</section></div>
+</div>
+<script>
+(function(){
+  var deck = document.querySelector('.deck');
+  function fit(){
+    var s = Math.min(1, (deck.clientWidth - 24) / 1280);
+    document.documentElement.style.setProperty('--s', s);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+})();
+</script>
+</html>

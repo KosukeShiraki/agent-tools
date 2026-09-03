@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<title>SHAP導入提案</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+JP:wght@400;500;700&display=swap">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --paper:#ffffff;
+  --navy:#12395b; --navy-d:#0b2740; --navy-t:#eaf0f6; --navy-m:#8397ab;
+  --acc:#9a2b32; --acc-t:#f8efef;
+  --ink:#1f2a33; --ink2:#41505e; --ink3:#5e6c79; --ink4:#8d98a3;
+  --rule:#bfc9d4; --hair:#dee5ec;
+  --fill:#f1f4f8; --fill2:#e2e9f0;
+  --surround:#d3d9df;
+  --jp:"Noto Sans JP","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif;
+  --ui:"IBM Plex Sans","Noto Sans JP",sans-serif;
+  --s:1;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--surround:#12181e}}
+:root[data-theme="dark"]{--surround:#12181e}
+body{background:var(--surround);font-family:var(--jp);color:var(--ink);-webkit-font-smoothing:antialiased;font-feature-settings:"palt" 1}
+.deck{padding:26px 12px 52px}
+.sheet{width:calc(1280px*var(--s));height:calc(720px*var(--s));margin:0 auto 20px}
+.page{width:1280px;height:720px;transform:scale(var(--s));transform-origin:top left;background:var(--paper);border:1px solid var(--hair);border-top:3px solid var(--navy);padding:46px 52px 34px;display:flex;flex-direction:column;position:relative;overflow:hidden}
+
+/* ---- 4層構造 ---- */
+.ttl{font-size:25px;font-weight:700;line-height:1.38;letter-spacing:.004em;text-wrap:balance;color:var(--navy-d)}
+.hr{height:1px;background:var(--navy-d);margin-top:13px}
+.lead{margin-top:15px;font-size:12.5px;line-height:1.9;color:var(--ink2);max-width:1020px}
+.lead b{font-weight:700;color:var(--ink)}
+.fig{flex:1;min-height:0;margin:24px 0 18px;display:flex;flex-direction:column;justify-content:center}
+.bl{flex:none;background:var(--fill);border-left:3px solid var(--acc);padding:12px 18px;display:flex;align-items:baseline;gap:16px}
+.bl .k{font-family:var(--ui);font-size:9px;letter-spacing:.16em;color:var(--ink4);font-weight:600;white-space:nowrap}
+.bl .m{font-size:13.5px;font-weight:700;line-height:1.6}
+.pn,.brand{position:absolute;bottom:12px;font-family:var(--ui);font-size:9.5px;color:var(--ink4);letter-spacing:.09em;font-variant-numeric:tabular-nums}
+.pn{right:52px}.brand{left:52px}
+
+/* ---- 部品 ---- */
+.bx{border:1px solid var(--rule);background:#fff;padding:13px 16px}
+.bx.s{border:2px solid var(--navy)}
+.bx.g{background:var(--fill);border-color:var(--fill2)}
+.bx.d{background:var(--navy);border-color:var(--navy);color:#fff}
+.bx.d .tx{color:#c9ccd1}
+.h4{font-size:14px;font-weight:700;line-height:1.45;color:var(--navy-d)}
+.h5{font-size:12.5px;font-weight:700;line-height:1.55;color:var(--navy-d)}
+.tx{font-size:11px;line-height:1.7;color:var(--ink3);margin-top:6px}
+.kk{font-family:var(--ui);font-size:9px;font-weight:600;letter-spacing:.14em;color:var(--ink4)}
+.nt{font-size:10px;line-height:1.66;color:#818890}
+.num{font-family:var(--ui);font-variant-numeric:tabular-nums}
+b.key{font-weight:700;color:var(--ink)}
+
+/* ---- 矢印 ---- */
+.ar{width:40px;height:0;border-top:1px solid var(--navy);position:relative;flex:none;align-self:center}
+.ar::after{content:"";position:absolute;top:-4px;right:-1px;width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:9px solid var(--navy)}
+.ar.thin{border-top-color:var(--rule)}
+.ar.thin::after{border-left-color:var(--rule)}
+.ard{width:0;height:26px;border-left:1px solid var(--navy);position:relative;margin:0 auto;flex:none}
+.ard::after{content:"";position:absolute;left:-4px;bottom:-1px;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:9px solid var(--navy)}
+
+/* ---- 表紙 ---- */
+.cover{justify-content:center;padding:0 96px}
+.cover .cap{font-family:var(--ui);font-size:10px;letter-spacing:.2em;color:var(--ink4);font-weight:600}
+.cover h1{font-size:40px;font-weight:700;line-height:1.4;margin-top:24px;letter-spacing:.01em;color:var(--navy-d)}
+.cover .sub{font-size:14px;line-height:1.9;color:var(--ink2);margin-top:22px;max-width:760px}
+.cover .cline{height:3px;background:var(--acc);width:120px;margin:36px 0 28px}
+.cover dl{display:flex;gap:56px}
+.cover dt{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;margin-bottom:6px}
+.cover dd{font-size:12px;color:var(--ink2);line-height:1.7}
+
+/* ---- P2 サマリー ---- */
+.qa{display:grid;grid-template-columns:44px 350px 40px 1fr 78px;align-items:stretch;row-gap:20px;column-gap:0}
+.qa .hd2{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--hair)}
+.qa .qn{font-family:var(--ui);font-size:20px;color:var(--navy-m);font-weight:500;display:flex;align-items:center}
+.qa .ref{font-family:var(--ui);font-size:10px;color:var(--ink4);display:flex;align-items:center;justify-content:flex-end;font-variant-numeric:tabular-nums}
+
+/* ---- P3 因果 ---- */
+.cz{display:grid;grid-template-columns:322px 44px 316px 44px 1fr;column-gap:0;align-items:center}
+.cz .col{display:flex;flex-direction:column;gap:14px}
+.czh{display:grid;grid-template-columns:322px 44px 316px 44px 1fr;margin-bottom:14px}
+.czh span{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:7px;border-bottom:1px solid var(--hair)}
+.czh span.gap{border:0}
+
+/* ---- P4 ツリー ---- */
+.tree{display:flex;flex-direction:column;align-items:center}
+.tcols{display:grid;grid-template-columns:repeat(3,376px);column-gap:24px;width:1176px}
+.tcols .lst{margin-top:12px;display:flex;flex-direction:column;gap:7px}
+.tcols .lst div{font-size:10.5px;line-height:1.6;color:var(--ink3);padding-left:12px;position:relative}
+.tcols .lst div::before{content:"";position:absolute;left:0;top:8px;width:5px;height:1px;background:var(--ink4)}
+
+/* ---- P5 分解 ---- */
+.flow3{display:grid;grid-template-columns:1fr 40px 1fr 40px 1fr;align-items:center;margin-bottom:26px}
+.wf{display:flex;align-items:stretch;gap:0}
+.wf .cell{flex:1;text-align:center}
+.wf .cap{font-size:10.5px;color:var(--ink3);min-height:34px;display:flex;align-items:center;justify-content:center;line-height:1.4}
+.wf .val{border:1px solid var(--rule);padding:13px 6px;font-family:var(--ui);font-size:17px;font-weight:600;font-variant-numeric:tabular-nums}
+.wf .val.up{background:var(--acc);color:#fff;border-color:var(--acc)}
+.wf .val.dn{background:#fff;color:var(--navy);border-color:var(--navy)}
+.wf .val.anchor{border:2px solid var(--navy);background:var(--navy-t);color:var(--navy-d)}
+.wf .op{width:26px;display:flex;align-items:center;justify-content:center;font-family:var(--ui);font-size:14px;color:var(--ink3);padding-top:30px}
+.lg{display:flex;gap:20px;margin-top:14px;align-items:center}
+.lg i{display:inline-block;width:16px;height:9px;margin-right:6px;vertical-align:middle}
+.lg i.a{background:var(--acc)}
+.lg i.b{background:#fff;border:1px solid var(--navy)}
+
+/* ---- P6 2軸 ---- */
+.mx{display:grid;grid-template-columns:26px 1fr 366px;column-gap:34px}
+.vax{position:relative;display:flex;align-items:center;justify-content:center}
+.vax .vt{writing-mode:vertical-rl;font-size:11px;font-weight:700;letter-spacing:.1em;color:var(--ink2)}
+.g4{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;min-height:284px}
+.g4 .cell{border:1px solid var(--rule);padding:14px 16px;margin:-0.5px}
+.g4 .cell.on{border:2px solid var(--acc);margin:-1px;z-index:1;background:var(--navy-t)}
+.axl{display:flex;justify-content:space-between;font-family:var(--ui);font-size:9.5px;letter-spacing:.1em;color:var(--ink4);font-weight:600;padding:0 2px}
+.hax{display:flex;align-items:center;gap:10px;margin-top:10px}
+.hax .ln{flex:1;height:0;border-top:1px solid var(--rule);position:relative}
+.hax .ln::before,.hax .ln::after{content:"";position:absolute;top:-3.5px;width:0;height:0;border-top:3.5px solid transparent;border-bottom:3.5px solid transparent}
+.hax .ln::before{left:-1px;border-right:8px solid var(--rule)}
+.hax .ln::after{right:-1px;border-left:8px solid var(--rule)}
+.hax span{font-size:10.5px;font-weight:700;color:var(--ink2)}
+.side{display:flex;flex-direction:column;gap:0;border-top:1px solid var(--ink)}
+.side .it{padding:13px 0;border-bottom:1px solid var(--hair)}
+.side .it:last-child{border-bottom:0}
+
+/* ---- P7 転換 ---- */
+.ba{display:grid;grid-template-columns:36px 1fr 44px 1fr;row-gap:14px;align-items:stretch}
+.ba .hd2{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--hair)}
+.ba .no{font-family:var(--ui);font-size:11px;color:var(--navy-m);display:flex;align-items:center;font-variant-numeric:tabular-nums}
+.ba .l{background:var(--fill);border:1px solid var(--fill2);padding:11px 14px;display:flex;align-items:center;font-size:12.5px;line-height:1.5;color:var(--ink3)}
+.ba .r{background:#fff;border:1px solid var(--navy);padding:11px 14px;display:flex;align-items:center;font-size:12.5px;font-weight:700;line-height:1.5;color:var(--navy-d)}
+
+/* ---- P8 プロセス ---- */
+.pr{display:grid;grid-template-columns:86px 1fr;column-gap:16px;row-gap:0;align-items:stretch}
+.pr .rl{font-family:var(--ui);font-size:9px;letter-spacing:.13em;color:var(--ink4);font-weight:600;display:flex;align-items:center}
+.pcols{display:grid;grid-template-columns:repeat(4,1fr);column-gap:30px;position:relative}
+.pcols .st{border:1px solid var(--navy);padding:12px 14px;position:relative}
+.pcols .st .kk{margin-bottom:6px;display:block}
+.pcols .st::after{content:"";position:absolute;right:-30px;top:50%;width:30px;height:0;border-top:1px solid var(--navy)}
+.pcols .st:last-child::after{display:none}
+.pcols .st .tip{position:absolute;right:-9px;top:calc(50% - 4px);width:0;height:0;border-top:4px solid transparent;border-bottom:4px solid transparent;border-left:9px solid var(--navy)}
+.pcols .st:last-child .tip{display:none}
+.drops{display:grid;grid-template-columns:repeat(4,1fr);column-gap:30px;height:26px}
+.tl{display:grid;grid-template-columns:repeat(4,1fr);column-gap:30px}
+.tl .seg{border-top:2px solid var(--navy);padding-top:7px;font-family:var(--ui);font-size:10px;color:var(--ink3);font-variant-numeric:tabular-nums}
+
+/* ---- P9 課題→対応→効果 ---- */
+.cae{display:grid;grid-template-columns:28px 330px 40px 396px 40px 1fr;row-gap:16px;align-items:stretch}
+.cae .hd2{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--hair)}
+.cae .no{font-family:var(--ui);font-size:11px;color:var(--navy-m);display:flex;align-items:center;font-variant-numeric:tabular-nums}
+.cae .c{display:flex;flex-direction:column;justify-content:center}
+
+/* ---- P10 意思決定 ---- */
+.dec{display:grid;grid-template-columns:566px 1fr;column-gap:40px}
+.dec .list{display:flex;flex-direction:column;gap:14px}
+.gantt{border-top:1px solid var(--navy)}
+.gantt .mh{display:grid;grid-template-columns:172px repeat(3,1fr);border-bottom:1px solid var(--hair)}
+.gantt .mh span{font-family:var(--ui);font-size:9.5px;letter-spacing:.1em;color:var(--ink4);font-weight:600;padding:7px 0 7px 9px;border-left:1px solid var(--hair)}
+.gantt .mh span:first-child{border-left:0;padding-left:0}
+.grow{display:grid;grid-template-columns:172px 1fr;height:36px;border-bottom:1px solid var(--hair);align-items:center}
+.grow .lbl{font-size:10.5px;line-height:1.4;color:var(--ink2);padding-right:12px}
+.grow .track{position:relative;height:100%}
+.grow .bar{position:absolute;top:50%;margin-top:-3.5px;height:7px;background:var(--navy)}
+.grow .bar.lt{background:var(--rule)}
+.gmark{position:absolute;top:0;bottom:0;width:0;border-left:1px dashed var(--acc);z-index:3}
+.gwrap{position:relative;padding-top:19px}
+.gnote{margin-top:9px;font-family:var(--ui);font-size:9.5px;color:var(--ink2);font-weight:600;letter-spacing:.06em}
+
+/* ---- 複数案の比較（比較表＋ハーヴェイボール） ---- */
+.cmp{border-top:1px solid var(--navy)}
+.cmp .r{display:grid;grid-template-columns:228px repeat(3,1fr);border-bottom:1px solid var(--hair)}
+.cmp .r>*{padding:13px 15px}
+.cmp.c2 .r{grid-template-columns:228px repeat(2,1fr)}
+.cmp.c4 .r{grid-template-columns:228px repeat(4,1fr)}
+.cmp .hd{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--ink4);font-weight:600}
+.cmp .opt{font-size:12.5px;font-weight:700;color:var(--navy-d)}
+.cmp .ax{font-size:11.5px;font-weight:700;color:var(--navy-d)}
+.cmp .cel{font-size:11px;line-height:1.6;color:var(--ink3);display:flex;gap:9px;align-items:flex-start}
+.cmp .on{background:var(--navy-t)}
+.cmp .r.head .on{border-top:2px solid var(--acc);padding-top:11px}
+.hb{flex:none;width:13px;height:13px;border:1px solid var(--navy);border-radius:50%;position:relative;overflow:hidden;margin-top:1px}
+.hb.f{background:var(--navy)}
+.hb.h::before{content:"";position:absolute;left:0;top:0;width:50%;height:100%;background:var(--navy)}
+.chip{display:inline-block;align-self:flex-start;font-family:var(--ui);font-size:9px;font-weight:600;letter-spacing:.1em;padding:2px 7px;border:1px solid var(--navy);color:var(--navy)}
+.chip.f{background:var(--navy);color:#fff}
+.chip.a{border-color:var(--acc);color:var(--acc)}
+
+/* ---- 循環（複数要素の因果関係） ---- */
+.loop{display:flex;align-items:stretch;width:1176px;margin:0 auto}
+.loop .bx{flex:1}
+
+/* ---- 階層（上位概念 → 下位概念） ---- */
+.lay{display:grid;grid-template-columns:112px 1fr;column-gap:16px;align-items:center}
+.lay .lb{font-family:var(--ui);font-size:9px;letter-spacing:.13em;color:var(--ink4);font-weight:600;text-align:right;line-height:1.5}
+.lay .band{border:1px solid var(--rule);display:grid}
+.lay .band.s{border:2px solid var(--navy)}
+.lay .band>div{padding:12px 15px;border-left:1px solid var(--hair)}
+.lay .band>div:first-child{border-left:0}
+.lay .ldrop{display:flex;justify-content:center;padding:5px 0}
+
+/* ---- 中央から展開（ハブ＆スポーク） ---- */
+.hub{position:relative;width:1176px;height:340px;margin:0 auto}
+.hub svg{position:absolute;left:0;top:0}
+.hub .node{position:absolute}
+
+/* ---- 収束（複数要因 → 1つの結論） ---- */
+.conv{display:flex;align-items:center;width:1176px;margin:0 auto}
+.conv .src{width:392px;display:flex;flex-direction:column;gap:14px}
+.conv .src .bx{height:76px;display:flex;flex-direction:column;justify-content:center}
+.conv svg{flex:none}
+.conv .dst{flex:1}
+
+/* ---- 定量チャート（推移・棒） ---- */
+.chart{width:1176px;margin:0 auto}
+.chart svg{display:block}
+.chart text{font-family:var(--jp)}
+.chart .g{stroke:var(--hair);stroke-width:1}
+.chart .ax{stroke:var(--rule);stroke-width:1}
+.chart .tk{font-family:var(--ui);font-size:9.5px;fill:var(--ink4)}
+.chart .xl{font-family:var(--ui);font-size:10px;fill:var(--ink3)}
+.chart .vl{font-family:var(--ui);font-size:10.5px;font-weight:600;fill:var(--navy-d)}
+.chart .vl.on{fill:var(--acc)}
+.chart .ser{fill:none;stroke:var(--navy);stroke-width:2}
+.chart .dot{fill:#fff;stroke:var(--navy);stroke-width:2}
+.chart .dot.on{fill:var(--acc);stroke:var(--acc)}
+.chart .bar{fill:var(--navy)}
+.chart .bar.on{fill:var(--acc)}
+.chart .mk{stroke:var(--acc);stroke-width:1;stroke-dasharray:3 3}
+.chart .mkl{font-family:var(--ui);font-size:9.5px;font-weight:600;fill:var(--acc)}
+
+/* ---- 構成比（100%積み上げ帯） ---- */
+.stkw{width:1176px;margin:0 auto}
+.stkr{display:grid;grid-template-columns:118px 1fr;align-items:center;column-gap:16px;margin-bottom:14px}
+.stkr .lb{font-size:11.5px;font-weight:700;color:var(--navy-d);text-align:right}
+.stk{display:flex;height:40px}
+.stk .sg{display:flex;align-items:center;justify-content:center;font-family:var(--ui);font-size:10px;font-weight:600;color:#fff;border-right:1px solid #fff;overflow:hidden;white-space:nowrap}
+.stk .sg:last-child{border-right:0}
+.stk .s1{background:var(--navy)}
+.stk .s2{background:#3d6389}
+.stk .s3{background:#7f9ab2}
+.stk .s4{background:#b9c7d5;color:var(--ink)}
+.stk .s5{background:var(--fill2);color:var(--ink2)}
+.stk .sa{background:var(--acc)}
+.lgd{display:flex;gap:20px;justify-content:flex-end;margin-top:6px}
+.lgd span{font-size:10px;color:var(--ink3);display:flex;align-items:center;gap:7px}
+.lgd i{width:14px;height:9px;display:inline-block}
+
+/* ---- KPIツリー（数式分解） ---- */
+.kpi{width:1176px;margin:0 auto}
+.kpi .lv{display:flex;align-items:stretch}
+.kpi .lv .bx{flex:1}
+.kpi .op{width:46px;flex:none;display:flex;align-items:center;justify-content:center;font-family:var(--ui);font-size:19px;color:var(--ink3)}
+.kpi .val{font-family:var(--ui);font-size:15px;font-weight:600;color:var(--navy-d);margin-top:6px;font-variant-numeric:tabular-nums}
+.kpi .val.on{color:var(--acc)}
+
+/* ---- 業務フロー（スイムレーン） ---- */
+.swim{position:relative;width:1176px;margin:0 auto}
+.swim .grid{display:grid;grid-template-columns:118px repeat(5,1fr);border-top:1px solid var(--navy)}
+.swim .hd{font-family:var(--ui);font-size:9px;letter-spacing:.12em;color:var(--ink4);font-weight:600;height:30px;display:flex;align-items:flex-end;padding:0 0 8px 20px;border-left:1px solid var(--hair)}
+.swim .hd.c0{border-left:0;padding-left:0}
+.swim .ln{font-family:var(--ui);font-size:9.5px;letter-spacing:.08em;color:var(--ink4);font-weight:600;display:flex;align-items:center;justify-content:flex-end;padding-right:12px;border-top:1px solid var(--hair);height:78px}
+.swim .cl{border-top:1px solid var(--hair);border-left:1px solid var(--hair);height:78px;display:flex;align-items:center;padding:0 20px}
+.swim .st{border:1px solid var(--navy);background:#fff;padding:9px 11px;font-size:11px;font-weight:700;color:var(--navy-d);line-height:1.4;width:100%}
+.swim .st.acc{border:2px solid var(--acc)}
+.swim .st .sb{display:block;font-size:9.5px;font-weight:400;color:var(--ink3);margin-top:3px}
+.swim .ov{position:absolute;left:0;top:0;pointer-events:none}
+
+/* ---- シナリオ（比較表の拡張） ---- */
+.cmp .r.sec{border-bottom:1px solid var(--navy);grid-template-columns:1fr}
+.cmp .r.sec>*{padding:14px 0 5px}
+.cmp .sub{font-family:var(--ui);font-size:9px;letter-spacing:.14em;color:var(--navy);font-weight:600}
+
+/* ---- ロードマップ（ワークストリーム × フェーズ） ---- */
+.rm{width:1176px;margin:0 auto;border-top:1px solid var(--navy)}
+.rm .mh{display:grid;grid-template-columns:158px repeat(4,1fr);border-bottom:1px solid var(--hair)}
+.rm .mh span{font-family:var(--ui);font-size:9.5px;letter-spacing:.1em;color:var(--ink4);font-weight:600;padding:8px 0 8px 10px;border-left:1px solid var(--hair)}
+.rm .mh span:first-child{border-left:0;padding-left:0}
+.rm .row{display:grid;grid-template-columns:158px 1fr;border-bottom:1px solid var(--hair);align-items:center;height:62px}
+.rm .ws{font-size:11.5px;font-weight:700;color:var(--navy-d);padding-right:14px;line-height:1.4}
+.rm .track{position:relative;height:100%}
+.rm .bar{position:absolute;top:50%;margin-top:-13px;height:26px;background:var(--navy-t);border-left:3px solid var(--navy);display:flex;align-items:center;padding-left:10px;font-size:10.5px;color:var(--navy-d);white-space:nowrap;overflow:hidden}
+.rm .bar.lt{background:var(--fill);border-left-color:var(--rule);color:var(--ink3)}
+.rm .ms{position:absolute;top:50%;width:11px;height:11px;margin:-6px 0 0 -6px;background:var(--acc);transform:rotate(45deg)}
+.rm .msl{position:absolute;top:50%;margin-top:-7px;font-family:var(--ui);font-size:9px;font-weight:600;color:var(--acc);white-space:nowrap}
+.rm .gl{position:absolute;top:0;bottom:0;border-left:1px solid var(--hair)}
+
+@media print{
+  body{background:#fff}
+  .deck{padding:0}
+  .sheet{width:1280px;height:720px;margin:0;page-break-after:always}
+  .page{transform:none;border:0}
+  @page{size:1280px 720px;margin:0}
+}
+</style>
+<div class="deck">
+
+<!-- ============ P1 表紙 ============ -->
+<div class="sheet"><section class="page cover">
+  <div class="cap">EXPLAINABLE AI / 経営会議 説明資料</div>
+  <h1>SHAP：AIの予測を<br>「説明できる意思決定材料」に変える</h1>
+  <p class="sub">機械学習モデルの予測値を、要因ごとの寄与量に分解する手法。<br>精度ではなく<b>説明可能性</b>が、AI投資の回収を止めている論点である。</p>
+  <div class="cline"></div>
+  <dl>
+    <div><dt>対象</dt><dd>経営層・部長クラス</dd></div>
+    <div><dt>目的</dt><dd>限定領域での90日パイロットのご承認</dd></div>
+    <div><dt>構成</dt><dd>全10ページ</dd></div>
+    <div><dt>作成</dt><dd>2026年9月</dd></div>
+  </dl>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">01 / 10</div>
+</section></div>
+
+<!-- ============ P2 サマリー ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">論点は「AIを高度化するか」ではなく、「AIの出力を人が説明できる形にするか」である</h2>
+  <div class="hr"></div>
+  <p class="lead">当社はこの3年でAIモデルの精度改善に投資してきたが、業務適用に至った案件は限定的である。本資料は、その原因を<b>説明可能性の欠如</b>と特定し、その解として手法SHAPを提示するものである。以下の3つの問いに沿って構成している。</p>
+  <div class="fig">
+    <div class="qa">
+      <div class="hd2"></div><div class="hd2">問い</div><div class="hd2"></div><div class="hd2">本資料の答え</div><div class="hd2" style="text-align:right">該当</div>
+
+      <div class="qn">Q1</div>
+      <div class="bx"><div class="h5">なぜ、精度の高いモデルが現場で使われないのか</div><p class="tx">技術評価では合格したモデルが、業務ではPoC止まりになる</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx g"><div class="h5">精度不足ではなく、<b class="key">1件ごとの予測根拠を提示できない</b>ことが原因である</div><p class="tx">現場・監査・改善の3経路で同時に価値が失われている</p></div>
+      <div class="ref">P3–P4</div>
+
+      <div class="qn">Q2</div>
+      <div class="bx"><div class="h5">SHAPは、その何を解決するのか</div><p class="tx">数ある解釈手法のなかで、何が決定的に異なるのか</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx g"><div class="h5">予測値を<b class="key">「基準値＋各要因の寄与量」に完全に分解</b>し、個別と全体の説明を一致させる</div><p class="tx">従来手法は「個別説明」か「全体傾向」のいずれか一方しか満たさない</p></div>
+      <div class="ref">P5–P7</div>
+
+      <div class="qn">Q3</div>
+      <div class="bx"><div class="h5">何を決めていただきたいのか</div><p class="tx">導入判断に必要な投資と後戻りのしやすさ</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx g"><div class="h5">既存要員3名・90日での<b class="key">限定領域パイロットの承認</b>（Day45でGo/No-Go）</div><p class="tx">今回の決定は「開始の可否」であり、「全社導入の可否」ではない</p></div>
+      <div class="ref">P8–P10</div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">投資すべきはモデルの精度ではなく、予測を「誰に、どの粒度で説明するか」という仕組みである。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">02 / 10</div>
+</section></div>
+
+<!-- ============ P3 因果 ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">モデルの高度化そのものが、現場適用を止める原因になっている</h2>
+  <div class="hr"></div>
+  <p class="lead">精度を追求するほど、モデルは非線形・高次元となり、内部構造は人間が追えなくなる。その結果、技術的には成功したモデルが業務では使われないまま滞留する。<b>精度と説明可能性はトレードオフの関係にある</b>という前提でご覧いただきたい。</p>
+  <div class="fig">
+    <div class="czh"><span>原因：技術的な選択</span><span class="gap"></span><span>問題：説明の断絶</span><span class="gap"></span><span>結果：事業上の損失</span></div>
+    <div class="cz">
+      <div class="col">
+        <div class="bx"><div class="h5">非線形・多変数モデルの採用</div><p class="tx">勾配ブースティング、ニューラルネットワーク等。判断が変数の組合せで決まる</p></div>
+        <div class="bx"><div class="h5">特徴量数の増大（数十〜数百）</div><p class="tx">変数間に相関があり、単純な重みでは寄与を切り分けられない</p></div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx s" style="padding:22px 18px;border-color:var(--acc)"><div class="kk" style="margin-bottom:8px;color:var(--acc)">CORE ISSUE</div><div class="h4">予測の根拠を、<br>個別案件のレベルで<br>提示できない</div><p class="tx">「全体としてどの変数が効いているか」は分かるが、「この1件がなぜこの結果か」に答えられない</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="col">
+        <div class="bx g"><div class="h5">現場が予測結果を採用しない</div><p class="tx">根拠を説明できない以上、担当者は自らの経験則を優先する</p></div>
+        <div class="bx g"><div class="h5">監査・規制対応に耐えられない</div><p class="tx">与信・採用等の重要判断では、判断根拠の開示義務が生じる</p></div>
+        <div class="bx g"><div class="h5">外れた予測を改善につなげられない</div><p class="tx">誤りの原因が特定できず、再学習しか打ち手がない</p></div>
+      </div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">問題はモデルの精度ではなく、精度と説明可能性のトレードオフを放置してきたことにある。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">03 / 10</div>
+</section></div>
+
+<!-- ============ P4 課題分解 ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">「説明できない」ことは、性質の異なる3つの損失を同時に生んでいる</h2>
+  <div class="hr"></div>
+  <p class="lead">説明不能性は単一の技術課題ではない。運用・統制・改善という3つの異なる経路で価値を毀損する。重要なのは、<b>3者が求める説明の粒度が異なる</b>点である。単一の対策では3つとも解けない。</p>
+  <div class="fig">
+    <div class="tree">
+      <div class="bx s" style="width:560px;text-align:center;padding:16px"><div class="h4">予測の根拠を、個別案件のレベルで提示できない</div></div>
+      <svg width="1176" height="54" viewBox="0 0 1176 54" aria-hidden="true" style="display:block">
+        <path d="M588 0 V20 M188 20 H988 M188 20 V42 M588 20 V42 M988 20 V42" fill="none" stroke="#12395b" stroke-width="1"/>
+        <polygon points="184,42 192,42 188,52" fill="#12395b"/>
+        <polygon points="584,42 592,42 588,52" fill="#12395b"/>
+        <polygon points="984,42 992,42 988,52" fill="#12395b"/>
+      </svg>
+      <div class="tcols">
+        <div>
+          <div class="bx" style="border-top:2px solid var(--navy)"><div class="kk">A｜運用の損失</div><div class="h4" style="margin-top:7px">現場が使わない</div><p class="tx">説明の相手＝<b class="key">業務担当者</b>／必要な粒度＝この1件がなぜこの結果か</p></div>
+          <div class="lst">
+            <div>推奨と経験則が食い違ったとき、判断の拠り所がない</div>
+            <div>採用率が上がらず、投資したモデルが使われない</div>
+            <div>顧客への説明ができず、対面業務で使えない</div>
+          </div>
+        </div>
+        <div>
+          <div class="bx" style="border-top:2px solid var(--navy)"><div class="kk">B｜統制の損失</div><div class="h4" style="margin-top:7px">説明責任を果たせない</div><p class="tx">説明の相手＝<b class="key">監査・監督官庁・顧客</b>／必要な粒度＝判断根拠の再現性</p></div>
+          <div class="lst">
+            <div>与信・採用など、判断根拠の開示が求められる領域で使えない</div>
+            <div>特定属性への不利益な偏りを検証できない</div>
+            <div>リスク管理部門が承認を出せず、適用範囲が広がらない</div>
+          </div>
+        </div>
+        <div>
+          <div class="bx" style="border-top:2px solid var(--navy)"><div class="kk">C｜改善の損失</div><div class="h4" style="margin-top:7px">誤りの原因を特定できない</div><p class="tx">説明の相手＝<b class="key">開発・分析チーム</b>／必要な粒度＝特徴量単位の寄与量</p></div>
+          <div class="lst">
+            <div>誤予測の原因が、データ由来か設計由来か切り分けられない</div>
+            <div>打ち手が「再学習」に限定され、改善が偶発的になる</div>
+            <div>本番環境での劣化を、要因ごとに監視できない</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">必要なのは「モデル全体の傾向」ではなく、1件ごとの予測を要因に分解し、3者それぞれの粒度で示す仕組みである。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">04 / 10</div>
+</section></div>
+
+<!-- ============ P5 SHAPの原理 ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">SHAPは、予測値を「基準値＋各要因の寄与」に完全に分解する</h2>
+  <div class="hr"></div>
+  <p class="lead">SHAPは、協力ゲーム理論の「シャープレイ値」（貢献度の公平な配分理論）をモデル解釈に応用した手法である。全案件の平均値（基準値）から、その1件の予測値までを、<b>どの要因が何ポイント押し上げ／押し下げたか</b>という加算形式で表す。下図は与信審査モデル（デフォルト確率の予測）の例である。</p>
+  <div class="fig">
+    <div class="flow3">
+      <div class="bx"><div class="kk">INPUT</div><div class="h5" style="margin-top:6px">この1件の特徴量</div><p class="tx">年収・勤続年数・延滞回数・借入比率など約30項目</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx s"><div class="kk">PROCESS</div><div class="h5" style="margin-top:6px">学習済みモデル ＋ SHAP</div><p class="tx">各要因を「使った場合／使わなかった場合」で総当たりに比較し、予測差分を公平に配分する</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx"><div class="kk">OUTPUT</div><div class="h5" style="margin-top:6px">要因別の寄与量</div><p class="tx">寄与量の合計は、必ず予測値と一致する（加法性）</p></div>
+    </div>
+    <div class="wf">
+      <div class="cell"><div class="cap">全体平均<br>（基準値）</div><div class="val anchor">12.0%</div><p class="nt" style="margin-top:7px">全案件のデフォルト率</p></div>
+      <div class="op">+</div>
+      <div class="cell"><div class="cap">延滞回数<br>3回</div><div class="val up">+5.5</div><p class="nt" style="margin-top:7px">最大の押し上げ要因</p></div>
+      <div class="op">+</div>
+      <div class="cell"><div class="cap">借入比率<br>62%</div><div class="val up">+3.2</div><p class="nt" style="margin-top:7px">基準の45%を超過</p></div>
+      <div class="op">+</div>
+      <div class="cell"><div class="cap">勤続年数<br>12年</div><div class="val dn">-2.1</div><p class="nt" style="margin-top:7px">リスクを下げる要因</p></div>
+      <div class="op">+</div>
+      <div class="cell"><div class="cap">その他<br>26項目</div><div class="val dn">-0.8</div><p class="nt" style="margin-top:7px">個別影響は軽微</p></div>
+      <div class="op">=</div>
+      <div class="cell"><div class="cap">この案件の<br>予測値</div><div class="val anchor">17.8%</div><p class="nt" style="margin-top:7px">基準比 +5.8pt</p></div>
+    </div>
+    <div class="lg">
+      <span class="nt"><i class="a"></i>赤＝予測を押し上げた要因（リスク増）</span>
+      <span class="nt"><i class="b"></i>白＝予測を押し下げた要因（リスク減）</span>
+      <span class="nt" style="margin-left:auto">現場への提示例：「延滞履歴と借入比率の高さが主因。勤続年数の長さは逆に評価されている」</span>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">SHAPの本質は「効いていそうな変数の列挙」ではなく、予測値の会計的な分解である。合計は必ず予測値に一致する。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">05 / 10</div>
+</section></div>
+
+<!-- ============ P6 2軸比較 ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">個別案件の説明と全体傾向の説明を、同一の基準で両立できるのはSHAPだけである</h2>
+  <div class="hr"></div>
+  <p class="lead">解釈手法は「説明の範囲（全体か個別か）」と「理論的な一貫性（寄与量が一意に定まるか）」の2軸で整理できる。<b>従来手法はいずれか一方しか満たさない</b>ため、P4で示した3つの損失のうち一部しか解消できない。</p>
+  <div class="fig">
+    <div class="mx">
+      <div class="vax"><span class="vt">理論的な一貫性</span></div>
+      <div>
+        <div class="axl" style="margin-bottom:7px"><span>高：寄与量が一意に定まり、再現性がある</span></div>
+        <div class="g4">
+          <div class="cell"><div class="h5">線形回帰の係数</div><p class="tx">係数がそのまま寄与量となり、説明は明快</p><p class="nt" style="margin-top:8px">制約：単純なモデルにしか使えず、精度を犠牲にする</p></div>
+          <div class="cell on"><div class="kk" style="color:var(--acc)">本提案</div><div class="h5" style="margin-top:6px">SHAP</div><p class="tx">1件ごとに寄与量を算出し、その平均が全体傾向と一致する</p><p class="nt" style="margin-top:8px">制約：計算コストと、因果との混同（P9で対応策を提示）</p></div>
+          <div class="cell"><div class="h5">特徴量重要度（Gain等）</div><p class="tx">モデル全体でどの変数が効いたかの順位を示す</p><p class="nt" style="margin-top:8px">制約：順位のみで量的意味が薄く、変数間の相関に弱い</p></div>
+          <div class="cell"><div class="h5">LIME</div><p class="tx">1件の周辺を単純モデルで近似し、局所的に説明する</p><p class="nt" style="margin-top:8px">制約：近似のため結果が安定せず、全体傾向とも整合しない</p></div>
+        </div>
+        <div class="axl" style="margin-top:7px"><span>低：算出方法や設定によって結果が変わる</span></div>
+        <div class="hax"><span>全体傾向の説明（Global）</span><span class="ln"></span><span>個別案件の説明（Local）</span></div>
+      </div>
+      <div>
+        <div class="kk" style="margin-bottom:10px">なぜ、2つの説明が両立している必要があるのか</div>
+        <div class="side">
+          <div class="it"><div class="h5">全体傾向だけでは、現場が動かない</div><p class="tx">目の前の1件を判断する担当者にとって、平均的な傾向は判断材料にならない</p></div>
+          <div class="it"><div class="h5">個別説明だけでは、経営・監査を通せない</div><p class="tx">モデル全体の妥当性・公平性を、統制部門に説明できない</p></div>
+          <div class="it"><div class="h5">両者が食い違えば、説明は信用を失う</div><p class="tx">SHAPは個別寄与の平均が全体傾向と一致するため、現場向けと経営向けの説明が矛盾しない</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">SHAPの優位性は精度ではなく、個別の説明を積み上げると全体の説明に一致するという構造にある。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">06 / 10</div>
+</section></div>
+
+<!-- ============ P7 前提の転換 ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">求められるのは技術の追加ではなく、AI活用の前提そのものの転換である</h2>
+  <div class="hr"></div>
+  <p class="lead">SHAPの導入は、分析ツールを1つ増やす取り組みではない。<b>モデルを業務のどこに位置づけるか</b>という前提を変える取り組みである。以下の4点について、社内の共通認識を切り替える必要がある。</p>
+  <div class="fig">
+    <div class="ba">
+      <div class="hd2"></div><div class="hd2">これまでの前提</div><div class="hd2"></div><div class="hd2">これからの前提</div>
+
+      <div class="no">01</div>
+      <div class="l">精度が高ければ、現場は使うはずだ</div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="r">根拠を示せて初めて、現場は使う</div>
+
+      <div class="no">02</div>
+      <div class="l">AIが人の判断を代替する</div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="r">AIは判断材料を要因に分解して提示し、決めるのは人である</div>
+
+      <div class="no">03</div>
+      <div class="l">モデルはデータ部門が保有する資産である</div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="r">モデルは業務部門の意思決定プロセスの一部である</div>
+
+      <div class="no">04</div>
+      <div class="l">説明は、求められたときに行う事後の報告作業である</div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="r">説明は、予測と同時に自動出力される標準機能である</div>
+    </div>
+    <p class="nt" style="margin-top:16px">※ 04が最も重要である。説明を事後作業として設計すると、担当者の工数が増えるため運用が続かない。予測と寄与量を同一画面に同時表示する設計が前提となる。</p>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">導入の成否を決めるのはアルゴリズムではなく、説明を業務プロセスに常設できるかどうかである。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">07 / 10</div>
+</section></div>
+
+<!-- ============ P8 導入プロセス ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">導入は4ステップで進み、各工程が単独で価値を生む</h2>
+  <div class="hr"></div>
+  <p class="lead">全社展開を前提とせず、限定領域で「説明付き予測」を業務に組み込み、効果を確認してから拡張する。既存モデルへの追加実装であるため、<b>モデルを作り直す必要はない</b>。所要は90日を目安とする。</p>
+  <div class="fig">
+    <div class="pr" style="row-gap:20px">
+      <div class="rl">工程</div>
+      <div class="pcols">
+        <div class="st"><span class="kk">STEP 01</span><div class="h5">対象業務の選定</div><p class="tx">説明が必要な意思決定を1つ特定し、説明の相手と粒度を定義する</p><i class="tip"></i></div>
+        <div class="st"><span class="kk">STEP 02</span><div class="h5">モデル構築とSHAP実装</div><p class="tx">既存の予測モデルに寄与量の算出処理を追加する</p><i class="tip"></i></div>
+        <div class="st"><span class="kk">STEP 03</span><div class="h5">業務プロセスへの組込み</div><p class="tx">予測値と上位要因を同一画面に同時表示し、試行運用する</p><i class="tip"></i></div>
+        <div class="st"><span class="kk">STEP 04</span><div class="h5">効果検証と拡張判断</div><p class="tx">採用率・精度・工数の3指標で評価し、次領域を決める</p><i class="tip"></i></div>
+      </div>
+
+      <div class="rl">この工程が<br>生む価値</div>
+      <div>
+        <div class="drops"><div class="ard"></div><div class="ard"></div><div class="ard"></div><div class="ard"></div></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);column-gap:30px">
+          <div class="bx g"><div class="h5">投資対効果の分母が定まる</div><p class="tx">「誰に何を説明するか」が決まり、成否の判定基準が明確になる</p></div>
+          <div class="bx g"><div class="h5">根拠が数値として可視化される</div><p class="tx">1件ごとの寄与量が出力され、統制部門の事前検証が可能になる</p></div>
+          <div class="bx g" style="border-left:3px solid var(--acc)"><div class="h5">現場の採用率が上がる</div><p class="tx">この時点で「使われないAI」の状態は解消される</p></div>
+          <div class="bx g"><div class="h5">改善サイクルが回り始める</div><p class="tx">誤予測の原因が要因単位で特定でき、再学習以外の打ち手を持てる</p></div>
+        </div>
+      </div>
+
+      <div class="rl">期間</div>
+      <div class="tl">
+        <div class="seg">Day 1 – 15</div>
+        <div class="seg">Day 16 – 45</div>
+        <div class="seg">Day 46 – 75</div>
+        <div class="seg">Day 76 – 90</div>
+      </div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">価値はSTEP04を待たずに発生する。STEP03の時点で、投資済みモデルが使われていない状態は解消する。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">08 / 10</div>
+</section></div>
+
+<!-- ============ P9 限界と対応 ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">SHAPの限界を先に定義しておけば、誤用のリスクは運用で管理できる</h2>
+  <div class="hr"></div>
+  <p class="lead">SHAPは万能ではない。とくに<b>「寄与が大きい＝原因である」と解釈する誤り</b>は、誤った施策判断に直結する。想定される3つの論点と、その対応方針をあらかじめ示す。</p>
+  <div class="fig">
+    <div class="cae">
+      <div class="hd2"></div><div class="hd2">論点</div><div class="hd2"></div><div class="hd2">対応策</div><div class="hd2"></div><div class="hd2">それにより得られる状態</div>
+
+      <div class="no">01</div>
+      <div class="bx c"><div class="h5">寄与量は相関であり、因果ではない</div><p class="tx">「延滞回数を減らせばリスクが下がる」とは限らない</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx c g"><div class="h5">用途を「説明」と「施策立案」で明確に分ける</div><p class="tx">施策の効果検証は因果推論またはA/Bテストで行う、という運用ルールを規程化する</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx c s"><div class="h5">誤った打ち手への投資を防げる</div></div>
+
+      <div class="no">02</div>
+      <div class="bx c"><div class="h5">厳密な計算は、特徴量数に対して指数的にコストが増える</div><p class="tx">全組合せの総当たり計算が理論上の前提となる</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx c g"><div class="h5">木系モデルに限定し、高速算出（TreeSHAP）を用いる</div><p class="tx">対象を主要変数に絞り、リアルタイム表示が不要な業務から適用する</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx c s"><div class="h5">既存インフラのまま実用時間に収まる</div></div>
+
+      <div class="no">03</div>
+      <div class="bx c"><div class="h5">数値の羅列は、現場では理解されない</div><p class="tx">寄与量の一覧を渡すだけでは、担当者は使えない</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx c g"><div class="h5">上位3要因を定型文に変換して提示する</div><p class="tx">表示の設計を業務部門と共同で行い、STEP03の試行運用で検証する</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx c s"><div class="h5">現場の理解と採用率を担保できる</div></div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">管理すべきは技術的リスクではなく、解釈のルールを定めないまま現場に配布することである。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">09 / 10</div>
+</section></div>
+
+<!-- ============ P10 意思決定 ============ -->
+<div class="sheet"><section class="page">
+  <h2 class="ttl">ご判断いただきたいのは、限定領域における90日パイロットの承認である</h2>
+  <div class="hr"></div>
+  <p class="lead">全社導入の是非を、本日決めていただく必要はない。効果検証に必要な最小単位で開始し、<b>Day45時点で継続可否を判断できる</b>設計としている。以下の3点についてご決定をお願いしたい。</p>
+  <div class="fig">
+    <div class="dec">
+      <div>
+        <div class="kk" style="margin-bottom:12px">本日ご決定いただきたい3点</div>
+        <div class="list">
+          <div class="bx s"><div class="h5"><span class="num">01｜</span>対象領域の確定</div><p class="tx">第一候補：与信審査（説明義務があり、効果が測定しやすい）／第二候補：需要予測</p></div>
+          <div class="bx s"><div class="h5"><span class="num">02｜</span>体制の承認</div><p class="tx">データ部門2名・業務部門1名の計3名。既存要員の兼務で対応し、追加採用・追加ライセンス費用は発生しない</p></div>
+          <div class="bx s"><div class="h5"><span class="num">03｜</span>継続判断のタイミング</div><p class="tx">Day45（STEP02完了時点）でGo/No-Goを判断。No-Goの場合も、算出した寄与量は既存モデルの検証資産として残る</p></div>
+        </div>
+        <p class="nt" style="margin-top:14px">※ 想定投資は3名×3か月の工数のみ。中止時の損失は限定的であり、判断の後戻りが可能な設計としている。</p>
+      </div>
+      <div>
+        <div class="kk" style="margin-bottom:12px">90日スケジュールと判断ポイント</div>
+        <div class="gantt">
+          <div class="mh"><span></span><span>MONTH 1</span><span>MONTH 2</span><span>MONTH 3</span></div>
+          <div class="gwrap">
+            <div class="grow"><span class="lbl">対象業務の選定・説明要件の定義</span><span class="track"><span class="bar" style="left:0;width:17%"></span></span></div>
+            <div class="grow"><span class="lbl">データ整備・モデル構築</span><span class="track"><span class="bar" style="left:15%;width:23%"></span></span></div>
+            <div class="grow"><span class="lbl">SHAP実装・寄与量の算出</span><span class="track"><span class="bar" style="left:33%;width:17%"></span></span></div>
+            <div class="grow"><span class="lbl">業務適用（試行運用）</span><span class="track"><span class="bar lt" style="left:50%;width:33%"></span></span></div>
+            <div class="grow" style="border-bottom:1px solid var(--navy)"><span class="lbl">効果検証・拡張判断</span><span class="track"><span class="bar lt" style="left:78%;width:22%"></span></span></div>
+            <div class="gmark" style="left:calc(50% + 86px)"><span style="position:absolute;left:6px;top:0;font-family:var(--ui);font-size:9px;font-weight:600;letter-spacing:.06em;color:var(--acc);background:#fff;padding:1px 4px;white-space:nowrap">Day 45 — Go / No-Go</span></div>
+          </div>
+          <div class="gnote">Day45（STEP02完了）で継続可否を判断。薄い帯＝継続決定後に着手する工程</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">今回の決定は「開始の可否」であり、「全社導入の可否」ではない。最小投資で、説明可能性という論点に決着をつける。</p></div>
+  <div class="brand">SHAP導入検討資料</div><div class="pn">10 / 10</div>
+</section></div>
+
+</div>
+<script>
+(function(){
+  var deck = document.querySelector('.deck');
+  function fit(){
+    var s = Math.min(1, (deck.clientWidth - 24) / 1280);
+    document.documentElement.style.setProperty('--s', s);
+  }
+  fit();
+  window.addEventListener('resize', fit);
+})();
+</script>
+</html>
