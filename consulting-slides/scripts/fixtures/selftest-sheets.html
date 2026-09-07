@@ -1,0 +1,110 @@
+<!-- render.py --self-test 用のページ群。assets/template.html の <style> と組み合わせて検査する。
+     各 <section class="page"> の data-expect が、そのページで鳴るべき検出名（カンマ区切り）。"OK" は何も鳴らないこと。 -->
+
+<div class="sheet"><section class="page" data-expect="FIG_OVERFLOW">
+  <h2 class="ttl">図解が .fig の高さを超えると FIG_OVERFLOW が出る</h2>
+  <div class="hr"></div>
+  <p class="lead">縮まない高さ520pxの箱を図解領域に置き、Bottom Line に重なる状態を再現する。</p>
+  <div class="fig"><div class="bx" style="flex:none;height:520px"><div class="h5">高さ520pxの箱（flex:none。無いと列フレックスの子として縮んで溢れない）</div></div></div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">図解領域の縦溢れを検出できること</p></div>
+  <div class="brand">SELF TEST</div><div class="pn">01 / 08</div>
+</section></div>
+
+<div class="sheet"><section class="page" data-expect="PAGE_OVERFLOW">
+  <h2 class="ttl">ページ全体が720pxを超えると PAGE_OVERFLOW が出る</h2>
+  <div class="hr"></div>
+  <p class="lead">縮まない要素を Bottom Line の下に置き、ページの縦溢れを再現する。</p>
+  <div class="fig"></div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">ページの縦溢れを検出できること</p></div>
+  <div class="bx" style="flex:none;height:640px"><div class="h5">flex:none の 640px の要素</div></div>
+  <div class="brand">SELF TEST</div><div class="pn">02 / 08</div>
+</section></div>
+
+<div class="sheet"><section class="page" data-expect="SPILL">
+  <h2 class="ttl">固定高さの箱から文字がはみ出すと SPILL が出る</h2>
+  <div class="hr"></div>
+  <p class="lead">高さ48pxの箱に3行以上の文章を入れる。overflow は visible のまま。</p>
+  <div class="fig"><div class="bx" style="height:48px;width:360px"><div class="h5">高さ48pxの箱に長文</div><p class="tx">この文章は箱の高さに収まらない。この文章は箱の高さに収まらない。この文章は箱の高さに収まらない。この文章は箱の高さに収まらない。</p></div></div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">箱からの文字はみ出しを検出できること</p></div>
+  <div class="brand">SELF TEST</div><div class="pn">03 / 08</div>
+</section></div>
+
+<div class="sheet"><section class="page" data-expect="CLIP">
+  <h2 class="ttl">overflow:hidden の箱で文字が切れると CLIP が出る</h2>
+  <div class="hr"></div>
+  <p class="lead">高さ48pxで overflow:hidden の箱に3行以上の文章を入れる。</p>
+  <div class="fig"><div class="bx" style="height:48px;width:360px;overflow:hidden"><div class="h5">高さ48pxの箱に長文</div><p class="tx">この文章は箱の高さに収まらない。この文章は箱の高さに収まらない。この文章は箱の高さに収まらない。この文章は箱の高さに収まらない。</p></div></div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">文字の切れを検出できること</p></div>
+  <div class="brand">SELF TEST</div><div class="pn">04 / 08</div>
+</section></div>
+
+<div class="sheet"><section class="page" data-expect="BLEED">
+  <h2 class="ttl">要素がページ右端を超えると BLEED が出る</h2>
+  <div class="hr"></div>
+  <p class="lead">left:1180px・幅200pxの箱を絶対配置し、右端 1280px を超えさせる。</p>
+  <div class="fig"><div class="bx" style="position:absolute;left:1180px;top:300px;width:200px"><div class="h5">右端を超える箱</div></div></div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">右端のはみ出しを検出できること</p></div>
+  <div class="brand">SELF TEST</div><div class="pn">05 / 08</div>
+</section></div>
+
+<div class="sheet"><section class="page" data-expect="PN_MISMATCH">
+  <h2 class="ttl">ページ番号が位置と合わないと PN_MISMATCH が出る</h2>
+  <div class="hr"></div>
+  <p class="lead">このページは6ページ目だが、.pn には「09 / 08」と書いてある。</p>
+  <div class="fig"><div class="bx" style="width:360px"><div class="h5">組版は正常</div><p class="tx">番号だけが誤っている。</p></div></div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">ページ番号の不一致を検出できること</p></div>
+  <div class="brand">SELF TEST</div><div class="pn">09 / 08</div>
+</section></div>
+
+<div class="sheet"><section class="page" data-expect="OK">
+  <h2 class="ttl">正常な「問い → 答え」ページでは何も鳴らない</h2>
+  <div class="hr"></div>
+  <p class="lead">矢印の疑似要素や空セルで誤検出しないことを確かめる。<b>短い文</b>だけで構成する。</p>
+  <div class="fig">
+    <div class="qa">
+      <div class="hd2"></div><div class="hd2">問い</div><div class="hd2"></div><div class="hd2">本資料の答え</div><div class="hd2" style="text-align:right">該当</div>
+      <div class="qn">Q1</div>
+      <div class="bx"><div class="h5">何が問題か</div><p class="tx">補足</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx g"><div class="h5">個別最適が<b class="key">複雑化</b>を生んでいる</div><p class="tx">根拠</p></div>
+      <div class="ref">P3–P4</div>
+      <div class="qn">Q2</div>
+      <div class="bx"><div class="h5">何をすべきか</div><p class="tx">補足</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx g"><div class="h5">共通基盤に<b class="key">寄せる</b></div><p class="tx">根拠</p></div>
+      <div class="ref">P5–P7</div>
+      <div class="qn">Q3</div>
+      <div class="bx"><div class="h5">何を決めるか</div><p class="tx">補足</p></div>
+      <div style="display:flex;align-items:center;justify-content:center"><div class="ar"></div></div>
+      <div class="bx g"><div class="h5">限定領域での<b class="key">パイロット承認</b></div><p class="tx">根拠</p></div>
+      <div class="ref">P8–P10</div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">正常ページで誤検出しないこと</p></div>
+  <div class="brand">SELF TEST</div><div class="pn">07 / 08</div>
+</section></div>
+
+<div class="sheet"><section class="page" data-expect="OK">
+  <h2 class="ttl">正常な「ハブ＆スポーク」ページでは何も鳴らない</h2>
+  <div class="hr"></div>
+  <p class="lead">SVG と絶対配置の箱を含むパターンで誤検出しないことを確かめる。</p>
+  <div class="fig">
+    <div class="hub">
+      <svg width="1176" height="340" viewBox="0 0 1176 340" aria-hidden="true">
+        <defs><marker id="hah" markerWidth="9" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0,0 9,3.5 0,7" fill="#12395b"/></marker></defs>
+        <path d="M428 146 L288 76" fill="none" stroke="#12395b" marker-end="url(#hah)"/>
+        <path d="M748 146 L888 76" fill="none" stroke="#12395b" marker-end="url(#hah)"/>
+        <path d="M428 206 L288 276" fill="none" stroke="#12395b" marker-end="url(#hah)"/>
+        <path d="M748 206 L888 276" fill="none" stroke="#12395b" marker-end="url(#hah)"/>
+      </svg>
+      <div class="node bx s" style="left:428px;top:126px;width:320px;height:100px;display:flex;flex-direction:column;justify-content:center">
+        <div class="kk">中核施策</div><div class="h4" style="margin-top:6px">共通基盤の整備</div></div>
+      <div class="node bx" style="left:0;top:34px;width:280px"><div class="h5">営業：提案が速くなる</div><p class="tx">具体</p></div>
+      <div class="node bx" style="left:896px;top:34px;width:280px"><div class="h5">審査：判断が揃う</div><p class="tx">具体</p></div>
+      <div class="node bx" style="left:0;top:234px;width:280px"><div class="h5">管理：集計が不要になる</div><p class="tx">具体</p></div>
+      <div class="node bx" style="left:896px;top:234px;width:280px"><div class="h5">経営：進捗が見える</div><p class="tx">具体</p></div>
+    </div>
+  </div>
+  <div class="bl"><span class="k">BOTTOM LINE</span><p class="m">SVG を含む正常ページで誤検出しないこと</p></div>
+  <div class="brand">SELF TEST</div><div class="pn">08 / 08</div>
+</section></div>

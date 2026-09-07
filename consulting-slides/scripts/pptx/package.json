@@ -1,0 +1,10 @@
+{
+  "name": "consulting-slides-pptx",
+  "private": true,
+  "description": "consulting-slides の HTML スライドを PPTX に変換する（references/export-pptx.md 参照）",
+  "type": "module",
+  "dependencies": {
+    "dom-to-pptx": "^2.1.1",
+    "puppeteer": "^25"
+  }
+}

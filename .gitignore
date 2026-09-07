@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 .DS_Store
+consulting-slides/scripts/pptx/node_modules/
+consulting-slides/scripts/pptx/package-lock.json
