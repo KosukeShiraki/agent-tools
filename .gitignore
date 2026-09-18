@@ -3,3 +3,7 @@ __pycache__/
 .DS_Store
 consulting-slides/scripts/pptx/node_modules/
 consulting-slides/scripts/pptx/package-lock.json
+
+# codex-exec の実行記録（既定では clone の外に置くが、CODEX_MCP_RUNS_DIR で
+# ここを指した場合に備えて除外しておく）
+mcp-servers/codex-exec/runs/
