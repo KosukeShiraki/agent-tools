@@ -521,7 +521,7 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
-170 件。
+172 件。
 
 **大半は Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
 実行できない（`spawn EFTYPE`）。WSL / Linux / macOS で実行すること。spawn を伴わない
@@ -534,6 +534,45 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 **ダミーは引数を検証しない**ので、`codex exec resume` に `--color` を渡していた不具合は
 テストを通過し、実 codex で初めて露見した。resume に渡すオプションは許可リストで
 固定してある（`test/protocol.test.mjs`）。
+
+## Windows でコンソール窓を出さない
+
+このサーバは stdio をパイプで繋がれた子として動くので、**自分のコンソールを持たない**。
+その状態でコンソールアプリを起こすと、Windows が新しいコンソールを確保する。既定の
+ターミナルが Windows ターミナル（Win11 の既定）だと、それが**見えるウィンドウとして
+開く**。子を起こす箇所に `windowsHide: true` を付けているのはこのためである。
+
+問題は**孫**で、`windowsHide` は子にしか効かない。codex は内部で `git.exe` を何度も
+呼び、0.155.0 では `codex-code-mode-host.exe` なども起こす。これらに hide を渡す手段は
+こちらに無い。
+
+効くのは、codex 自身に**隠しコンソールを持たせて孫に継承させる**ことだった。Node の
+`detached: true` は Windows では `DETACHED_PROCESS`（コンソールを一切持たない）になり、
+孫が自前で確保してしまう。`windowsHide` だけなら `CREATE_NO_WINDOW` になり、隠し
+コンソールを持つ。実測（コンソール無しの親から 4 段で `git` を 4 回呼ばせる再現）:
+
+```
+{ detached: true, windowsHide: true } → 窓 1〜3 個（OpenConsole + WindowsTerminal）
+{ windowsHide: true }                 → 窓 0 個（3 回とも）
+```
+
+**代償は承知のうえで受け入れている。** `CREATE_NEW_PROCESS_GROUP` も外れるため、
+コンソールが消えると子も道連れになる。
+
+| | 以前（`detached` あり） | 現在 |
+|---|---|---|
+| サーバが `SIGKILL` された | codex は走り続け、次回起動の孤児回収で kill | **ツリーごと即死** |
+| 端末で Ctrl+C | 切り離した run は生き残る | **run も落ちる** |
+
+1 行目はむしろ望ましい（孤児も課金継続も残らない。孤児回収はどのみちその run を
+kill するので、生き残っても作業が回収されるわけではない）。2 行目は明確な損失だが、
+明滅を止めることを優先した。**長い `apply` を切り離している間は Ctrl+C を押さないこと。**
+
+POSIX は従来どおり `detached: true`。`killTree` が `process.kill(-pid)` でプロセス
+グループごと落とすのに要るため、ここは変えていない。
+
+なお根本原因は Codex CLI 側にある（`git.exe` の起動に hide を渡していない）。上流で
+直れば、この回避は要らなくなる。
 
 ## 排他と同時実行の範囲
 
@@ -571,7 +610,7 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 7.0.1
+現在: 7.1.0
 ```
 
 **いまどの設定で動くかは `config` tool で分かる**（引数なしで呼ぶ）。コード既定か config
@@ -601,6 +640,7 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 | 6.3.0 | claude の許可リストをコード既定（`DEFAULT_ALLOWED_TOOLS`）へ移す。登録が引数ゼロで済むようになり、再登録で設定が黙って消えなくなった。あわせて `--print-config` を追加 |
 | 7.0.0 | **モデル/effort の設定を `config` tool に集約**。環境変数 4 つ（`AGENT_EXEC_*_MODEL` / `_EFFORT`）と `--print-config` を廃止。設定は `config.json` に保存し、run ごとに解決するのでサーバ再起動が要らない。MCP しか使えない呼び出し側からも設定を扱える（[経緯](#どこで変えるか)） |
 | 7.0.1 | 外部レビューの 6 件を修正、あわせて run 起動ごとの PowerShell 呼び出しを 1 回減らした（自分の起動時刻は変わらないのにキャッシュしておらず、Windows で毎 run 440ms かかっていた）。(1) `config` の検査が `codex:` 接頭辞付きのモデル名をそのまま照合していたため、**受理した effort を run が黙って捨てて**いた（検査も解決後の名前を使う）。(2) `result` が生死不明の run を停止済みと同じ扱いにし、`isError` で「報告が記録されていません」と返していた（[生死判定は 3 値](#設計上の注意)が `status` でしか守られていなかった）。(3) プロセスの身元照会が「引けなかった」と「別プロセスだった」を同じ値に潰していたため、**照会の失敗がそのまま全 run の停止済み判定**になりえた（`markerVerdict` で 3 値にした）。(4) `config.json` の更新に読み書きの排他が無く、別サーバと同時に変えると**どちらも成功と答えて片方の変更が消えた**。一時ファイルも固定名で、応答と保存内容が食い違いえた（[ロックと一時ファイル名](#どこで変えるか)）。(5) 打ち切り中の run を、親 CLI の終了だけで手放していた。SIGTERM を無視する孫が残っている間に **repo 予約が空き**、その隙にサーバが終了すると SIGKILL の予約ごと消えて**孫が残り続けた**（meta は既に killed なので孤児回収も拾わない）。停止完了まで追跡を残す。(6) prune が**他のサーバの順番待ち run** を消しえた（pid がまだ無いので生死判定が必ず dead になる）。あわせて[排他と同時実行の範囲](#排他と同時実行の範囲)が 1 プロセス内に限られることを明記した |
+| 7.1.0 | **Windows で `detached` を外した**。コンソールを持たない子から codex を起こすと、codex が呼ぶ `git.exe` 等が毎回コンソールを確保して**ウィンドウが明滅**していた。`windowsHide` だけにすると隠しコンソールを持ち、孫が継承するので窓が出ない（実測 窓 1〜3 個 → 0 個）。代償として端末の Ctrl+C で run が落ちる（[理由](#windows-でコンソール窓を出さない)） |
 
 ## 環境変数
 
@@ -648,8 +688,10 @@ claude mcp add agent -s user -- node <clone>/mcp-servers/agent-exec/server.mjs
   stdout を継いだ孫（別プロセスグループへ逃げたもの）を残すと `close` は来ないので、
   `exit` を購読して 1 秒の drain 猶予で確定させる。これが無いと、正常終了していても
   `timeout_ms` まで待たされる。
-- **打ち切り**: `detached: true` でプロセスグループを作り、`SIGTERM` → 3秒後 `SIGKILL` を
-  グループごと送る。SIGKILL 後 2 秒で強制的に応答を返す。
+- **打ち切り**: POSIX では `detached: true` でプロセスグループを作り、`SIGTERM` → 3秒後
+  `SIGKILL` をグループごと送る。Windows は `taskkill /T` が親子を辿るのでグループは要らない。
+  SIGKILL 後 2 秒で強制的に応答を返す。
+- **Windows では `detached` を付けない**（[理由](#windows-でコンソール窓を出さない)）。
 - **孤児プロセス**: 通常終了（`exit` / `SIGINT` / `SIGTERM` / `SIGHUP`）では、切り離した
   run も**打ち切りの完了を待っている run** も含めて全て落とす（放置すると課金が続く
   ため）。サーバが `SIGKILL` された場合は
@@ -716,7 +758,8 @@ claude mcp add agent -s user -- node <clone>/mcp-servers/agent-exec/server.mjs
   ので、自分のコンソールを持たない。その状態で `git.exe` や `powershell.exe` を起こすと、
   Windows が**新しいコンソールウィンドウを作る**（画面が明滅する）。子プロセスを起こす
   箇所には必ず `windowsHide: true` を付ける。`git.mjs` にこれが無く、`apply` のたびに
-  git を 6 回呼んでウィンドウが明滅していた。
+  git を 6 回呼んでウィンドウが明滅していた。**孫には効かない**ので、codex には隠し
+  コンソールを持たせて継承させる（[Windows でコンソール窓を出さない](#windows-でコンソール窓を出さない)）。
 - **起動時刻はキャッシュする**: `currentBootId()` は Windows で PowerShell を起こすため
   **1 回 350〜440ms** かかる（実測）。キャッシュが無いと `prune` が保持 run の数だけ呼ぶので、
   25 run で 9 秒近くかかっていた。このプロセスが生きている間は値が変わらないので、

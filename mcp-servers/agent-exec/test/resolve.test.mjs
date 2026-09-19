@@ -12,7 +12,12 @@ import { describe, it } from "node:test";
 import claudeBackend from "../lib/backends/claude.mjs";
 import codexBackend from "../lib/backends/codex.mjs";
 import { adapterById, resolveAdapter } from "../lib/backends/index.mjs";
-import { currentProcessStartTime, markerVerdict, processStartTime } from "../lib/platform.mjs";
+import {
+  currentProcessStartTime,
+  markerVerdict,
+  processStartTime,
+  spawnExtras,
+} from "../lib/platform.mjs";
 import { resolveSettings, validatePatch } from "../lib/settings.mjs";
 
 describe("モデル名からアダプタを決める", () => {
@@ -532,6 +537,32 @@ describe("自分の起動時刻はキャッシュする", () => {
       currentProcessStartTime();
       const ms = Number(process.hrtime.bigint() - started) / 1e6;
       assert.ok(ms < 50, `2 回目に ${ms.toFixed(1)}ms かかった（毎回引き直している）`);
+    },
+  );
+});
+
+// spawn の OS 依存オプション。ここを取り違えると静かに壊れる種類の設定なので、
+// 実際に窓が出るかは手で確かめるしかないぶん、意図だけはテストで固定しておく。
+describe("spawnExtras（OS ごとの spawn オプション）", () => {
+  it(
+    "Windows では detached を付けない（孫がコンソール窓を作るため）",
+    { skip: process.platform === "win32" ? false : "Windows 固有" },
+    () => {
+      const extras = spawnExtras();
+      // detached は DETACHED_PROCESS になり、子がコンソールを一切持たなくなる。
+      // すると codex が起こす git.exe 等が自前で新しいコンソールを確保して明滅する。
+      assert.equal(extras.detached, undefined, "detached を付けると孫が窓を作る");
+      // windowsHide だけなら CREATE_NO_WINDOW = 隠しコンソールを持ち、孫が継承する。
+      assert.equal(extras.windowsHide, true, "隠しコンソールを持たせるために要る");
+    },
+  );
+
+  it(
+    "POSIX では detached でプロセスグループを作る",
+    { skip: process.platform === "win32" ? "POSIX 固有" : false },
+    () => {
+      // killTree が process.kill(-pid) でグループごと落とすのに要る。
+      assert.equal(spawnExtras().detached, true);
     },
   );
 });

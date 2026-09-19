@@ -233,9 +233,23 @@ export function killTree(pid, signal) {
 
 // spawn に渡す OS 依存のオプション。
 export function spawnExtras() {
-  // detached は POSIX では新しいプロセスグループ、Windows では
-  // CREATE_NEW_PROCESS_GROUP になる。どちらも「親と道連れにしない」ために要る。
-  return IS_WINDOWS ? { detached: true, windowsHide: true } : { detached: true };
+  // POSIX: detached で新しいプロセスグループを作る。killTree が `process.kill(-pid)` で
+  // グループごと落とすのに要る。
+  //
+  // Windows: **detached を付けない。** Node の detached は DETACHED_PROCESS になり、
+  // 子は「コンソールを一切持たない」状態で動く。するとその子（= codex が起こす git.exe
+  // など）が**自前で新しいコンソールを確保し、そのたびにウィンドウが明滅する**。
+  // windowsHide だけなら CREATE_NO_WINDOW となり、子は**隠しコンソール**を持つので、
+  // 孫はそれを継承して新規確保が起きない。実測（git を 4 回呼ばせる再現）:
+  //   { detached: true, windowsHide: true } → 窓 1〜3 個
+  //   { windowsHide: true }                 → 窓 0 個
+  //
+  // 代償として、CREATE_NEW_PROCESS_GROUP も外れる。コンソールが消えると子も道連れに
+  // なるため、(1) サーバが SIGKILL されると codex ツリーごと即死し (2) 端末で Ctrl+C を
+  // 押すと実行中の run も落ちる。(1) は孤児も課金継続も残らないので望ましい側で、
+  // (2) は承知のうえで受け入れている（[排他と同時実行の範囲] 近辺の README 参照）。
+  // killTree は Windows では taskkill /T で親子を辿るので、プロセスグループは要らない。
+  return IS_WINDOWS ? { windowsHide: true } : { detached: true };
 }
 
 // この OS でプロセスの身元確認ができるか。できない環境では孤児の回収を見送る
