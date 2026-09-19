@@ -46,7 +46,7 @@ import {
 } from "./lib/runs.mjs";
 
 const SERVER_NAME = "agent-exec";
-const SERVER_VERSION = "6.1.0";
+const SERVER_VERSION = "6.1.1";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 // 反射してよいのはサポートしている版だけ。未知の版には自分の版を返す。
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -244,7 +244,7 @@ function runProperties(mode) {
     prompt: {
       type: "string",
       description:
-        "Codex に渡す指示。resume_session_id を使わない限り会話は継続しないため、" +
+        "委譲先への指示。resume_session_id を使わない限り会話は継続しないため、" +
         "必要な文脈はこの中に書く。",
     },
     timeout_ms: {
@@ -281,9 +281,13 @@ function toolDefinitions() {
   return [
     {
       name: "consult",
+      // 実運用の記録では用途の 100% がレビューで、調査は 0 件。単なる事実確認なら
+      // 呼び出し側が自分で読むほうが安いので、レビュー役としての使い方を先に書く。
       description:
-        "Codex に読み取り専用（-s read-only）で相談する。コード調査・レビュー・設計相談・" +
-        "セカンドオピニオンに使う。Codex はファイルを読めるが一切書き換えない。" +
+        "別系統のモデルに、読み取り専用で独立レビューをさせる。実装前の設計レビュー・" +
+        "実装後のコードレビュー・再レビューに使う。resume_session_id を渡せば同じレビュー役に" +
+        "段階をまたいで見せられる（前回の指摘が解消したかを同じ目で確認できる）。" +
+        "ファイルは読めるが一切書き換えない。事実を集めるだけの調査なら、自分で読むほうが安い。" +
         `${fixedModelNote(TOOL_MODES.consult)}`,
       inputSchema: {
         type: "object",
@@ -302,7 +306,7 @@ function toolDefinitions() {
     {
       name: "apply",
       description:
-        "Codex に workspace-write で作業させる。cwd 配下のファイルを書き換える。" +
+        "書き込み可で実装させる。cwd 配下のファイルを書き換える。" +
         "変更を戻せるようにするため cwd は git 管理下である必要がある。" +
         "応答には変更ファイル一覧と diff --stat が付く。" +
         "既定では「テストを実行し、コマンドと結果を報告に含める」よう指示する。" +
