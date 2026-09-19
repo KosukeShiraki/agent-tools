@@ -47,7 +47,8 @@ lib/backends/claude.mjs  claude -p 固有
 アダプタは `runs.mjs` も `child_process` も import しない。永続化も spawn もせず、
 **純関数だけを公開する**。イベント解析は「1 行 → delta」を返すだけで、meta の更新・
 セッション索引の登録・報告の追記は engine 側が行う。おかげで argv 組み立てとイベント
-解釈が spawn 無しでテストでき、その部分は **Windows でも走る**（`test/resolve.test.mjs`）。
+解釈が spawn 無しでテストでき、その部分は **Windows でも走る**（`test/resolve.test.mjs` と
+`test/config.test.mjs`）。
 
 ## 背景
 
@@ -128,6 +129,14 @@ config({ apply: { model: "" } })                CLI 側の設定に委ねる
 
 保存先は `~/.claude/agent-exec/config.json`（run の記録の隣＝clone の外）。**サーバの
 再起動は要らない**。設定は run ごとに解決されるので、次の run から効く。
+
+同じファイルを別の Claude Code セッションの MCP サーバも使うので、**変更は
+「読み込み → パッチ適用 → 検証 → 保存」をまとめてロックする**（`config.json.lock` を
+`mkdir` で作る。mkdir は不可分なので依存を増やさずに済む）。ここを守らないと、A が
+`consult` を・B が `apply` を変えたときに**どちらも成功と答えたのに片方の変更だけ消える**。
+設定が黙って消えるのは 7.0.0 で潰したはずの失敗なので、ここで再発させない。
+読み出しはロックを取らない（rename が不可分なので、読み手は常に完全な JSON を見る）。
+run ごとの設定解決がロック待ちで止まらないようにするため。
 
 **7.0.0 で環境変数（`AGENT_EXEC_CONSULT_MODEL` など 4 つ）を廃した。** 理由は 2 つある。
 
@@ -512,11 +521,13 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
-159 件。
+165 件。
 
-**Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
-実行できない（`spawn EFTYPE`）。spawn を伴わない検証は通るが、それ以外は全滅する。
-WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Windows で clone すると
+**大半は Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
+実行できない（`spawn EFTYPE`）。WSL / Linux / macOS で実行すること。spawn を伴わない
+`test/resolve.test.mjs`（モデル解決・argv・イベント解釈・プロセス身元の判定）と
+`test/config.test.mjs`（設定の同時更新）は Windows でも通るので、運用環境が Windows で
+ある以上、ここに寄せられる検証は寄せる。なお `core.autocrlf=true` の Windows で clone すると
 `.sh` が CRLF になり、WSL 側でも `/usr/bin/env: 'bash\r'` で落ちる。repo 直下の
 `.gitattributes` が `*.sh text eol=lf` で固定している。
 
@@ -563,7 +574,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 | 6.2.0 | 外部レビューで挙がった 6 件を修正（下記）。repo 予約の競合、打ち切り中の SIGKILL 取り消し、`result` に拒否・失敗が出ない、セッション索引の `backend` 欠落、接続先の環境変数の巻き添え削除、ダミーの実行権限 |
 | 6.3.0 | claude の許可リストをコード既定（`DEFAULT_ALLOWED_TOOLS`）へ移す。登録が引数ゼロで済むようになり、再登録で設定が黙って消えなくなった。あわせて `--print-config` を追加 |
 | 7.0.0 | **モデル/effort の設定を `config` tool に集約**。環境変数 4 つ（`AGENT_EXEC_*_MODEL` / `_EFFORT`）と `--print-config` を廃止。設定は `config.json` に保存し、run ごとに解決するのでサーバ再起動が要らない。MCP しか使えない呼び出し側からも設定を扱える（[経緯](#どこで変えるか)） |
-| 7.0.1 | 外部レビューの 3 件を修正。(1) `config` の検査が `codex:` 接頭辞付きのモデル名をそのまま照合していたため、**受理した effort を run が黙って捨てて**いた（検査も解決後の名前を使う）。(2) `result` が生死不明の run を停止済みと同じ扱いにし、`isError` で「報告が記録されていません」と返していた（[生死判定は 3 値](#設計上の注意)が `status` でしか守られていなかった）。(3) プロセスの身元照会が「引けなかった」と「別プロセスだった」を同じ値に潰していたため、**照会の失敗がそのまま全 run の停止済み判定**になりえた（`markerVerdict` で 3 値にした） |
+| 7.0.1 | 外部レビューの 4 件を修正。(1) `config` の検査が `codex:` 接頭辞付きのモデル名をそのまま照合していたため、**受理した effort を run が黙って捨てて**いた（検査も解決後の名前を使う）。(2) `result` が生死不明の run を停止済みと同じ扱いにし、`isError` で「報告が記録されていません」と返していた（[生死判定は 3 値](#設計上の注意)が `status` でしか守られていなかった）。(3) プロセスの身元照会が「引けなかった」と「別プロセスだった」を同じ値に潰していたため、**照会の失敗がそのまま全 run の停止済み判定**になりえた（`markerVerdict` で 3 値にした）。(4) `config.json` の更新に読み書きの排他が無く、別サーバと同時に変えると**どちらも成功と答えて片方の変更が消えた**。一時ファイルも固定名で、応答と保存内容が食い違いえた（[ロックと一時ファイル名](#どこで変えるか)） |
 
 ## 環境変数
 
@@ -648,6 +659,10 @@ claude mcp add agent -s user -- node <clone>/mcp-servers/agent-exec/server.mjs
   漏れていた）を `meta.terminal_seen` に改めた。書くときは両方、読むときも両方見る。
   これは「PID 再利用で終わった run が永久に実行中に見える」問題への唯一の対策なので、
   移行中に落とすと呼び出し側が無限ポーリングする。
+- **一時ファイル名は書き手ごとに分ける**: `<path>.<pid>.<乱数>.tmp` にする。固定名だと
+  A が書いた一時ファイルを B が上書きしてから A が `rename` し、**A の応答と実際に
+  保存された内容が食い違う**（続く B の `rename` は移動済みなので `ENOENT`）。
+  「最後の更新が勝つ」ではなく、成功したと答えた内容が保存されていない状態になる。
 - **記録の保護**: `meta.json` と セッション索引は一時ファイル + `rename` で書き換える
   （同一 FS の rename は不可分なので、他プロセスが途中の状態を読まない）。prune は
   meta が読めない run を消さない — 書き込み途中かもしれないものを消す側に倒すと、

@@ -15,13 +15,27 @@
 // 実行してよいか）は**コードに置いたまま**にする。あれは金額ではなく安全の宣言で、
 // 実行中のエージェントが自分で緩められる場所に置くものではない。
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 
 import { resolveAdapter } from "./backends/index.mjs";
+import { isAlive, processStartTime } from "./platform.mjs";
 import { RUNS_ROOT } from "./runs.mjs";
 
 export const CONFIG_PATH = join(dirname(RUNS_ROOT), "config.json");
+const LOCK_PATH = `${CONFIG_PATH}.lock`;
+// 設定の変更は「モデルを切り替える」ときの操作で、頻度は低く一瞬で終わる。
+// ここで長く待たせるより、待てなければ理由を返して呼び直させる。
+const LOCK_TIMEOUT_MS = 2_000;
+const LOCK_RETRY_MS = 25;
 
 // 設定できるキー。増やすときはここと config tool の schema の両方を変える。
 export const SETTING_KEYS = ["model", "effort"];
@@ -45,9 +59,90 @@ export function readConfig() {
 
 function writeConfig(config) {
   mkdirSync(dirname(CONFIG_PATH), { recursive: true });
-  const tmp = `${CONFIG_PATH}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
-  renameSync(tmp, CONFIG_PATH); // 書きかけを他のサーバに読ませない
+  // 一時ファイルは**書き手ごとに分ける**。固定名にすると、A が書いた一時ファイルを
+  // B が上書きしてから A が rename し、**A の応答と実際に保存された内容が食い違う**。
+  // 続く B の rename は動かされた後なので ENOENT になる。runs.mjs も同じ理由で
+  // pid を付けている。
+  const tmp = `${CONFIG_PATH}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`);
+    renameSync(tmp, CONFIG_PATH); // 書きかけを他のサーバに読ませない
+  } catch (err) {
+    rmSync(tmp, { force: true }); // rename 前に落ちても置き去りにしない
+    throw err;
+  }
+}
+
+/** 設定ファイルを触っている別サーバが落ちて残したロックか */
+function lockIsStale() {
+  let owner;
+  try {
+    owner = JSON.parse(readFileSync(join(LOCK_PATH, "owner.json"), "utf8"));
+  } catch {
+    // mkdir と owner.json の間で落ちた、あるいはまだ書かれていない。
+    // 前者と後者を見分けられないので、十分に古いときだけ横取りする。
+    try {
+      return Date.now() - statMtimeMs(LOCK_PATH) > LOCK_TIMEOUT_MS * 4;
+    } catch {
+      return false;
+    }
+  }
+  if (!Number.isInteger(owner?.pid) || !isAlive(owner.pid)) return true;
+  // pid が生きていても、それが持ち主とは限らない（PID 再利用）。起動時刻まで見る。
+  return Boolean(owner.start) && processStartTime(owner.pid) !== owner.start;
+}
+
+function statMtimeMs(path) {
+  return statSync(path).mtimeMs;
+}
+
+// 同期のまま待つ。setTimeout は使えない（updateConfig は同期）。ビジーループに
+// しないために Atomics.wait を使う。
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * 「読み込み → パッチ適用 → 検証 → 保存」を 1 つの操作として守る。
+ *
+ * temp + rename が保証するのは**書き換えの不可分性だけ**で、読み書きの排他ではない。
+ * 別の Claude Code セッションの MCP サーバが同じ config.json を使うので、守らないと
+ * 「A が consult を、B が apply を変えて、どちらも成功と答えたのに A の変更だけ消える」
+ * が起きる。設定が黙って消えるのは 7.0.0 で潰したはずの失敗なので、ここで再発させない。
+ *
+ * mkdir は不可分なので、これだけでプロセス間の排他になる（依存を増やさずに済む）。
+ */
+function withConfigLock(fn) {
+  mkdirSync(dirname(CONFIG_PATH), { recursive: true });
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  for (;;) {
+    try {
+      mkdirSync(LOCK_PATH); // recursive を付けない。既にあれば EEXIST で落ちる
+      break;
+    } catch (err) {
+      if (err?.code !== "EEXIST") throw err;
+      if (lockIsStale()) {
+        rmSync(LOCK_PATH, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `他のプロセスが設定を更新中のため ${LOCK_TIMEOUT_MS} ms 待っても書き込めませんでした` +
+            `（${LOCK_PATH}）。少し待って config を呼び直してください。`,
+        );
+      }
+      sleepSync(LOCK_RETRY_MS);
+    }
+  }
+  try {
+    writeFileSync(
+      join(LOCK_PATH, "owner.json"),
+      JSON.stringify({ pid: process.pid, start: processStartTime(process.pid) }),
+    );
+    return fn();
+  } finally {
+    rmSync(LOCK_PATH, { recursive: true, force: true });
+  }
 }
 
 // 空文字は「モデル/effort を渡さず CLI 側の設定に委ねる」の明示。未設定（キーが無い）
@@ -160,9 +255,30 @@ function mergeInto(current, patch) {
   return next;
 }
 
-/** 設定を書き換えて保存する。@returns 保存後の全体 */
-export function updateConfig(patchByTool) {
-  const config = readConfig();
+/**
+ * 設定を書き換えて保存する。
+ *
+ * `validate` を渡すと、**ロックの中で読み直した設定**に対して呼ぶ。検証と保存を
+ * 別々に設定を読んで行うと、その間に他のサーバが書き換えた場合に「検証した内容」と
+ * 「保存した内容」がずれる。理由を返せばファイルには触らない。
+ *
+ * @param {(toolName: string, patch: object, config: object) => string|null} [validate]
+ * @returns {{ config: object, reason?: undefined } | { reason: string, config?: undefined }}
+ */
+export function updateConfig(patchByTool, validate) {
+  return withConfigLock(() => {
+    const config = readConfig();
+    if (validate) {
+      for (const [toolName, patch] of Object.entries(patchByTool)) {
+        const reason = validate(toolName, patch, config);
+        if (reason) return { reason };
+      }
+    }
+    return { config: mergeAndWrite(config, patchByTool) };
+  });
+}
+
+function mergeAndWrite(config, patchByTool) {
   for (const [toolName, patch] of Object.entries(patchByTool)) {
     const next = mergeInto(config[toolName] ?? {}, patch);
     if (Object.keys(next).length === 0) delete config[toolName];

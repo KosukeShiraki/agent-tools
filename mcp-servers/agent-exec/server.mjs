@@ -1409,12 +1409,18 @@ function handleConfig(params) {
 
   if (Object.keys(patch).length === 0) return textResult(formatSettings());
 
-  for (const [toolName, value] of Object.entries(patch)) {
-    const reason = validatePatch(toolName, TOOL_MODES[toolName], value);
-    if (reason) return errorResult(`${reason}\n設定は変更していません。`);
+  // 検証は updateConfig のロックの中で、保存するのと同じスナップショットに対して走る。
+  // ここで別々に設定を読むと、検証した内容と保存した内容がずれうる。
+  let result;
+  try {
+    result = updateConfig(patch, (toolName, value, config) =>
+      validatePatch(toolName, TOOL_MODES[toolName], value, config),
+    );
+  } catch (err) {
+    return errorResult(`設定を変更できませんでした: ${String(err?.message ?? err)}`);
   }
-  const config = updateConfig(patch);
-  return textResult(`設定を変更しました。\n\n${formatSettings(config)}`);
+  if (result.reason) return errorResult(`${result.reason}\n設定は変更していません。`);
+  return textResult(`設定を変更しました。\n\n${formatSettings(result.config)}`);
 }
 
 // ---------------------------------------------------------------- MCP ハンドラ
