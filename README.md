@@ -5,7 +5,7 @@ Claude Code / Codex CLI で使う道具の置き場。スキルと MCP サーバ
 | 種類 | 名前 | 内容 |
 |---|---|---|
 | スキル | `consulting-slides` | 経営層向けの戦略コンサルティング資料を HTML スライド（16:9）で作成する。24種の図解パターン、ヘッドレス Chrome による全ページ画像検証つき。求められたときだけ PPTX にも変換できる |
-| MCP サーバ | `mcp-servers/codex-exec` | Codex CLI を MCP の tool として Claude Code へ公開する。相談と実装を委譲でき、長時間の run は切り離して後から結果を取れる |
+| MCP サーバ | `mcp-servers/agent-exec` | Codex CLI を MCP の tool として Claude Code へ公開する。相談と実装を委譲でき、長時間の run は切り離して後から結果を取れる |
 
 ## セットアップ（各端末で1回）
 
@@ -21,20 +21,20 @@ ln -s ~/projects/agent-tools/consulting-slides ~/.claude/skills/consulting-slide
 ln -s ~/projects/agent-tools/consulting-slides ~/.codex/skills/consulting-slides    # Codex CLI
 ```
 
-### MCP サーバ（codex-exec）
+### MCP サーバ（agent-exec）
 
 前提: Node（22 で動作確認）、[Codex CLI](https://github.com/openai/codex)（login 済み）、git。
 `npm install` は要らない（Node 標準モジュールのみで動く）。
 
 ```bash
-claude mcp add codex -s user -- node ~/projects/agent-tools/mcp-servers/codex-exec/server.mjs
+claude mcp add agent -s user -- node ~/projects/agent-tools/mcp-servers/agent-exec/server.mjs
 claude mcp list   # ✔ Connected を確認
 ```
 
 反映は次に Claude Code を起動したときから。実行記録は clone の外
-（`~/.claude/codex-exec/runs`）に置かれるので、この repo は汚れない。
+（`~/.claude/agent-exec/runs`）に置かれるので、この repo は汚れない。
 
-詳細は [`mcp-servers/codex-exec/README.md`](mcp-servers/codex-exec/README.md)。
+詳細は [`mcp-servers/agent-exec/README.md`](mcp-servers/agent-exec/README.md)。
 
 #### 対応 OS
 
@@ -60,10 +60,10 @@ MCP サーバのコードを更新した場合、**動いているサーバプ�
 ## テスト
 
 ```bash
-cd ~/projects/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs test/runs.test.mjs
+cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/protocol.test.mjs test/runs.test.mjs
 ```
 
-実 Codex は呼ばず、ダミーに差し替えて 83 件を検証する。
+実 Codex は呼ばず、ダミーに差し替えて 85 件を検証する。
 
 **Windows では走らない**（ダミーが shebang 付きの `.sh` で、Windows は実行できない）。
 WSL / Linux / macOS で実行すること。

@@ -20,12 +20,33 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { readEnv, readEnvInt } from "./env.mjs";
+
 // 既定の置き場は server の隣ではなく home の下。server を git repo で配る場合に、
 // 実行記録（数百 MB になる）が clone したディレクトリへ混ざらないようにする。
-export const RUNS_ROOT =
-  process.env.CODEX_MCP_RUNS_DIR || join(homedir(), ".claude", "codex-exec", "runs");
+//
+// 5.0.0 で codex-exec → agent-exec に改名した。旧パスに記録があって新パスがまだ無い
+// 端末では、旧パスを使い続ける。ここで勝手に新パスへ切り替えると、既存の run と
+// セッション索引が「消えた」ように見える（resume が全部切れる）。
+function resolveRunsRoot() {
+  const explicit = readEnv("AGENT_EXEC_RUNS_DIR", "CODEX_MCP_RUNS_DIR");
+  if (explicit) return explicit;
+  const current = join(homedir(), ".claude", "agent-exec", "runs");
+  if (existsSync(current)) return current;
+  const legacy = join(homedir(), ".claude", "codex-exec", "runs");
+  if (existsSync(legacy)) {
+    process.stderr.write(
+      `warning: 旧い記録先 ${legacy} を使います。` +
+        `移行するには \`mv ~/.claude/codex-exec ~/.claude/agent-exec\` を実行してください\n`,
+    );
+    return legacy;
+  }
+  return current;
+}
 
-const MAX_RUNS = Math.max(1, Number.parseInt(process.env.CODEX_MCP_MAX_RUNS ?? "", 10) || 50);
+export const RUNS_ROOT = resolveRunsRoot();
+
+const MAX_RUNS = readEnvInt("AGENT_EXEC_MAX_RUNS", "CODEX_MCP_MAX_RUNS", 50, 1);
 const MAX_RUN_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 // events.jsonl は長い作業だと大きくなる。読むのは末尾だけにする
 // （thread_id は meta.json に控えるので、先頭を読み落としても困らない）。
@@ -35,9 +56,10 @@ const MAX_EVENTS_READ_BYTES = 2 * 1024 * 1024;
 // 複数サーバ間で衝突して登録が消えるので、session ごとに分ける。
 const SESSIONS_DIR = "sessions";
 // 完了直後の run は応答を組み立てている最中かもしれないので、この間は消さない。
-const PRUNE_GRACE_MS = Math.max(
-  0,
-  Number.parseInt(process.env.CODEX_MCP_PRUNE_GRACE_MS ?? "", 10) || 120_000,
+const PRUNE_GRACE_MS = readEnvInt(
+  "AGENT_EXEC_PRUNE_GRACE_MS",
+  "CODEX_MCP_PRUNE_GRACE_MS",
+  120_000,
 );
 // 報告本文の 1 件あたりの上限。events.jsonl とは別に残す。
 const MAX_MESSAGE_CHARS = 256 * 1024;

@@ -166,7 +166,7 @@ export function makeWorkspace(prefix) {
     env(extra = {}) {
       return {
         CODEX_HOME: codexHome,
-        CODEX_MCP_RUNS_DIR: runsDir,
+        AGENT_EXEC_RUNS_DIR: runsDir,
         CODEX_FAKE_ARGV_FILE: join(root, "argv.txt"),
         CODEX_FAKE_STDIN_FILE: join(root, "stdin.txt"),
         CODEX_FAKE_PWD_FILE: join(root, "pwd.txt"),

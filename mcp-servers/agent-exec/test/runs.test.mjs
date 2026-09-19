@@ -22,7 +22,7 @@ describe("run の記録", () => {
   });
 
   it("完了時に run_id と session_id を返し、記録を残す", async () => {
-    const res = await server.call("codex_consult", { prompt: "調べて", cwd: ws.plainDir });
+    const res = await server.call("consult", { prompt: "調べて", cwd: ws.plainDir });
     const text = textOf(res.result);
     assert.equal(res.result.isError, undefined, text);
     const runId = runIdOf(text);
@@ -38,20 +38,20 @@ describe("run の記録", () => {
 
     const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8"));
     assert.equal(meta.state, "completed");
-    assert.equal(meta.tool, "codex_consult");
+    assert.equal(meta.tool, "consult");
     assert.equal(meta.thread_id, FAKE_THREAD_ID);
     assert.equal(meta.sandbox, "read-only");
     assert.deepEqual(meta.item_counts, { command_execution: 1, agent_message: 1 });
   });
 
   it("usage を応答に載せる", async () => {
-    const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+    const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
     assert.match(textOf(res.result), /tokens: in=100 out=20/);
   });
 
-  it("codex_apply は変更ファイルと diff --stat を返す", async () => {
+  it("apply は変更ファイルと diff --stat を返す", async () => {
     const res = await server.call(
-      "codex_apply",
+      "apply",
       { prompt: "直して", cwd: ws.gitDir },
       {},
       30_000,
@@ -63,16 +63,16 @@ describe("run の記録", () => {
     assert.match(text, /1 file changed|seed\.txt \|/);
   });
 
-  it("codex_runs が新しい順に一覧する", async () => {
-    const res = await server.call("codex_runs", { limit: 5 });
+  it("runs が新しい順に一覧する", async () => {
+    const res = await server.call("runs", { limit: 5 });
     const text = textOf(res.result);
     assert.match(text, /最近の run（新しい順）/);
-    assert.match(text, /codex_apply/);
+    assert.match(text, /apply/);
     assert.match(text, /state=completed/);
   });
 
   it("存在しない run_id は見つからないと返す", async () => {
-    const res = await server.call("codex_status", { run_id: "20200101-000000-000-aaaa" });
+    const res = await server.call("status", { run_id: "20200101-000000-000-aaaa" });
     assert.equal(res.result.isError, true);
     assert.match(textOf(res.result), /run が見つかりません/);
   });
@@ -93,7 +93,7 @@ describe("切り離し（detach）", () => {
   });
 
   it("timeout_ms を超えたら打ち切らず run_id と途中経過を返す", async () => {
-    const res = await server.call("codex_apply", {
+    const res = await server.call("apply", {
       prompt: "長い作業",
       cwd: ws.gitDir,
       timeout_ms: 1500,
@@ -109,14 +109,14 @@ describe("切り離し（detach）", () => {
     assert.match(text, /command_execution=1 agent_message=1/);
 
     const runId = runIdOf(text);
-    // 実行中は codex_status で追える
-    const status = await server.call("codex_status", { run_id: runId });
+    // 実行中は status で追える
+    const status = await server.call("status", { run_id: runId });
     const statusText = textOf(status.result);
     assert.match(statusText, /state=running/);
     assert.ok(!statusText.includes("サーバ管理外"), statusText);
 
-    // codex_result は wait_ms で完了まで待てる
-    const result = await server.call("codex_result", { run_id: runId, wait_ms: 20_000 }, {}, 40_000);
+    // result は wait_ms で完了まで待てる
+    const result = await server.call("result", { run_id: runId, wait_ms: 20_000 }, {}, 40_000);
     const resultText = textOf(result.result);
     assert.equal(result.result.isError, undefined, resultText);
     assert.match(resultText, /state=completed/);
@@ -125,7 +125,7 @@ describe("切り離し（detach）", () => {
   });
 
   it("kill_on_timeout=true なら打ち切る", async () => {
-    const res = await server.call("codex_consult", {
+    const res = await server.call("consult", {
       prompt: "長い作業",
       cwd: ws.plainDir,
       timeout_ms: 1500,
@@ -138,16 +138,16 @@ describe("切り離し（detach）", () => {
     assert.match(text, /PARTIAL_REPORT/);
   });
 
-  it("完了後は codex_result を何度でも呼べる", async () => {
+  it("完了後は result を何度でも呼べる", async () => {
     const first = await server.call(
-      "codex_consult",
+      "consult",
       { prompt: "x", cwd: ws.plainDir, timeout_ms: 20_000 },
       {},
       40_000,
     );
     const runId = runIdOf(textOf(first.result));
     for (let i = 0; i < 2; i += 1) {
-      const again = await server.call("codex_result", { run_id: runId });
+      const again = await server.call("result", { run_id: runId });
       assert.equal(again.result.isError, undefined);
       assert.match(textOf(again.result), /FAKE_ANSWER/);
     }
@@ -166,7 +166,7 @@ describe("サーバ再起動後の復元", () => {
     const first = startServer(ws.env());
     let runId;
     try {
-      const res = await first.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await first.call("consult", { prompt: "x", cwd: ws.plainDir });
       runId = runIdOf(textOf(res.result));
     } finally {
       first.close();
@@ -179,13 +179,13 @@ describe("サーバ再起動後の復元", () => {
 
     const second = startServer(ws.env());
     try {
-      const status = await second.call("codex_status", { run_id: runId });
+      const status = await second.call("status", { run_id: runId });
       const statusText = textOf(status.result);
       assert.match(statusText, /このサーバの管理外。記録から復元/);
       // events.jsonl に turn.completed があるので完了と推定できる
       assert.match(statusText, /state=completed\(推定\)/);
 
-      const result = await second.call("codex_result", { run_id: runId });
+      const result = await second.call("result", { run_id: runId });
       assert.equal(result.result.isError, undefined, textOf(result.result));
       assert.match(textOf(result.result), /FAKE_ANSWER/);
     } finally {
@@ -204,13 +204,13 @@ describe("同時実行", () => {
 
   it("上限を守って直列化する", async () => {
     const server = startServer(
-      ws.env({ CODEX_MCP_MAX_CONCURRENCY: "1", CODEX_FAKE_SLEEP: "1.2" }),
+      ws.env({ AGENT_EXEC_MAX_CONCURRENCY: "1", CODEX_FAKE_SLEEP: "1.2" }),
     );
     try {
       const startedAt = Date.now();
       const both = await Promise.all([
-        server.call("codex_consult", { prompt: "1本目", cwd: ws.plainDir }, {}, 30_000),
-        server.call("codex_consult", { prompt: "2本目", cwd: ws.plainDir }, {}, 30_000),
+        server.call("consult", { prompt: "1本目", cwd: ws.plainDir }, {}, 30_000),
+        server.call("consult", { prompt: "2本目", cwd: ws.plainDir }, {}, 30_000),
       ]);
       const elapsed = Date.now() - startedAt;
       for (const res of both) assert.equal(res.result.isError, undefined, textOf(res.result));
@@ -222,11 +222,11 @@ describe("同時実行", () => {
 
   it("切り離した run もスロットを保持し、空かなければ待たせる", async () => {
     const server = startServer(
-      ws.env({ CODEX_MCP_MAX_CONCURRENCY: "1", CODEX_FAKE_SLEEP: "8" }),
+      ws.env({ AGENT_EXEC_MAX_CONCURRENCY: "1", CODEX_FAKE_SLEEP: "8" }),
     );
     try {
       // 1本目を切り離す（codex はまだ走っている）
-      const first = await server.call("codex_consult", {
+      const first = await server.call("consult", {
         prompt: "長い",
         cwd: ws.plainDir,
         timeout_ms: 1200,
@@ -234,7 +234,7 @@ describe("同時実行", () => {
       assert.match(textOf(first.result), /切り離しました/);
 
       // 2本目はスロットが空かないので待たされ、timeout_ms で諦める
-      const second = await server.call("codex_consult", {
+      const second = await server.call("consult", {
         prompt: "次",
         cwd: ws.plainDir,
         timeout_ms: 1500,
@@ -258,7 +258,7 @@ describe("異常系", () => {
   it("codex が非ゼロ終了なら isError と stderr を返す", async () => {
     const server = startServer(ws.env({ CODEX_FAKE_EXIT: "3", CODEX_FAKE_STDERR: "boom" }));
     try {
-      const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       const text = textOf(res.result);
       assert.equal(res.result.isError, true, text);
       assert.match(text, /exit=3/);
@@ -273,7 +273,7 @@ describe("異常系", () => {
   it("報告がまったく無ければ isError で知らせる", async () => {
     const server = startServer(ws.env({ CODEX_FAKE_NO_OUTPUT: "1", CODEX_FAKE_NO_EVENTS: "1" }));
     try {
-      const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       assert.equal(res.result.isError, true);
       assert.match(textOf(res.result), /報告を返しませんでした/);
     } finally {
@@ -284,7 +284,7 @@ describe("異常系", () => {
   it("codex が見つからなければ起動失敗として返す", async () => {
     const server = startServer(ws.env({ CODEX_BIN: join(ws.root, "no-such-codex") }));
     try {
-      const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       assert.equal(res.result.isError, true);
       assert.match(textOf(res.result), /codex の起動に失敗/);
     } finally {
@@ -297,7 +297,7 @@ describe("異常系", () => {
     const server = startServer(ws.env({ CODEX_FAKE_ORPHAN: marker }));
     try {
       const startedAt = Date.now();
-      const res = await server.call("codex_consult", {
+      const res = await server.call("consult", {
         prompt: "x",
         cwd: ws.plainDir,
         timeout_ms: 600_000,
@@ -340,7 +340,7 @@ describe("git 差分の正確さ", () => {
     // ユーザが run の前に fileB を編集しておく（codex は触らない）
     writeFileSync(join(ws.gitDir, "fileB.txt"), "edited by user\n");
 
-    const res = await server.call("codex_apply", { prompt: "直して", cwd: ws.gitDir });
+    const res = await server.call("apply", { prompt: "直して", cwd: ws.gitDir });
     const text = textOf(res.result);
     assert.equal(res.result.isError, undefined, text);
 
@@ -368,7 +368,7 @@ describe("別セッションが動かしている run", () => {
     const serverA = startServer(ws.env({ CODEX_FAKE_SLEEP: "20", CODEX_FAKE_NO_EVENTS: "1" }));
     let runId;
     try {
-      const res = await serverA.call("codex_consult", {
+      const res = await serverA.call("consult", {
         prompt: "長い",
         cwd: ws.plainDir,
         timeout_ms: 1200,
@@ -379,17 +379,17 @@ describe("別セッションが動かしている run", () => {
       // サーバ B から同じ記録を見る。A は生きているので孤児回収の対象外
       const serverB = startServer(ws.env());
       try {
-        const result = await serverB.call("codex_result", { run_id: runId });
+        const result = await serverB.call("result", { run_id: runId });
         const text = textOf(result.result);
         // ここで isError にすると、呼び出し側が「失敗した」と誤解して再実行に走る
         assert.equal(result.result.isError, undefined, text);
         assert.match(text, /まだ動いています/);
 
-        const status = await serverB.call("codex_status", { run_id: runId });
+        const status = await serverB.call("status", { run_id: runId });
         assert.match(textOf(status.result), /別プロセスで継続中/);
 
-        const runs = await serverB.call("codex_runs", { limit: 5 });
-        // codex_runs と codex_status で状態がちぐはぐにならないこと
+        const runs = await serverB.call("runs", { limit: 5 });
+        // runs と status で状態がちぐはぐにならないこと
         assert.match(textOf(runs.result), /別プロセスで継続中/);
       } finally {
         serverB.close();
@@ -404,7 +404,7 @@ describe("別セッションが動かしている run", () => {
     let runId;
     let pid;
     try {
-      const res = await serverA.call("codex_consult", {
+      const res = await serverA.call("consult", {
         prompt: "長い",
         cwd: ws.plainDir,
         timeout_ms: 1200,
@@ -421,7 +421,7 @@ describe("別セッションが動かしている run", () => {
     try {
       // 起動時の回収が終わるまで少し待つ
       await serverB.request("ping", {});
-      const status = await serverB.call("codex_status", { run_id: runId });
+      const status = await serverB.call("status", { run_id: runId });
       assert.match(textOf(status.result), /state=killed/);
       assert.match(serverB.stderr, /前回のサーバが残した codex を回収しました/);
     } finally {
@@ -444,7 +444,7 @@ describe("イベントの頑健さ", () => {
   });
 
   it("壊れた行・未知 item・巨大行があっても落ちない", async () => {
-    const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir }, {}, 30_000);
+    const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir }, {}, 30_000);
     const text = textOf(res.result);
     assert.equal(res.result.isError, undefined, text);
 
@@ -483,13 +483,13 @@ describe("スロットの会計", () => {
 
   it("上限 2 で 3 本投げると、完了した順に次が入る", async () => {
     const server = startServer(
-      ws.env({ CODEX_MCP_MAX_CONCURRENCY: "2", CODEX_FAKE_SLEEP: "1.5" }),
+      ws.env({ AGENT_EXEC_MAX_CONCURRENCY: "2", CODEX_FAKE_SLEEP: "1.5" }),
     );
     try {
       const started = Date.now();
       const results = await Promise.all(
         ["a", "b", "c"].map((tag) =>
-          server.call("codex_consult", { prompt: tag, cwd: ws.plainDir }, {}, 40_000),
+          server.call("consult", { prompt: tag, cwd: ws.plainDir }, {}, 40_000),
         ),
       );
       for (const res of results) assert.equal(res.result.isError, undefined, textOf(res.result));
@@ -499,7 +499,7 @@ describe("スロットの会計", () => {
       assert.ok(elapsed < 8_000, `スロットが解放されていない: ${elapsed}ms`);
 
       // 会計がずれていなければ、この後も普通に実行できる
-      const after = await server.call("codex_consult", { prompt: "d", cwd: ws.plainDir }, {}, 40_000);
+      const after = await server.call("consult", { prompt: "d", cwd: ws.plainDir }, {}, 40_000);
       assert.equal(after.result.isError, undefined, textOf(after.result));
     } finally {
       server.close();
@@ -507,12 +507,12 @@ describe("スロットの会計", () => {
   });
 
   it("検証エラーでスロットを取りこぼさない", async () => {
-    const server = startServer(ws.env({ CODEX_MCP_MAX_CONCURRENCY: "1" }));
+    const server = startServer(ws.env({ AGENT_EXEC_MAX_CONCURRENCY: "1" }));
     try {
-      await server.call("codex_consult", { prompt: "", cwd: ws.plainDir }); // 検証エラー
-      await server.call("codex_consult", { prompt: "x", cwd: "/nope" }); // cwd エラー
-      await server.call("codex_apply", { prompt: "x", cwd: ws.plainDir }); // git エラー
-      const ok = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir }, {}, 20_000);
+      await server.call("consult", { prompt: "", cwd: ws.plainDir }); // 検証エラー
+      await server.call("consult", { prompt: "x", cwd: "/nope" }); // cwd エラー
+      await server.call("apply", { prompt: "x", cwd: ws.plainDir }); // git エラー
+      const ok = await server.call("consult", { prompt: "x", cwd: ws.plainDir }, {}, 20_000);
       assert.equal(ok.result.isError, undefined, textOf(ok.result));
     } finally {
       server.close();
@@ -522,11 +522,11 @@ describe("スロットの会計", () => {
   it("起動失敗が続いてもスロットを取りこぼさない", async () => {
     // 検証エラーと違い、こちらはスロットを取った後に失敗する経路を通る
     const server = startServer(
-      ws.env({ CODEX_MCP_MAX_CONCURRENCY: "1", CODEX_BIN: join(ws.root, "no-such-codex") }),
+      ws.env({ AGENT_EXEC_MAX_CONCURRENCY: "1", CODEX_BIN: join(ws.root, "no-such-codex") }),
     );
     try {
       for (let i = 0; i < 3; i += 1) {
-        const res = await server.call("codex_consult", { prompt: `x${i}`, cwd: ws.plainDir });
+        const res = await server.call("consult", { prompt: `x${i}`, cwd: ws.plainDir });
         const text = textOf(res.result);
         assert.equal(res.result.isError, true, text);
         // スロットが枯れていれば「同時実行の上限」で止まり、起動まで到達しない
@@ -540,7 +540,7 @@ describe("スロットの会計", () => {
   it("codex が見つからなくても failed として扱い、打ち切り扱いにしない", async () => {
     const server = startServer(ws.env({ CODEX_BIN: join(ws.root, "no-such-codex") }));
     try {
-      const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       const text = textOf(res.result);
       assert.equal(res.result.isError, true);
       assert.match(text, /codex の起動に失敗/);
@@ -577,7 +577,7 @@ describe("PID 再利用への耐性", () => {
       join(dir, "meta.json"),
       JSON.stringify({
         run_id: runId,
-        tool: "codex_consult",
+        tool: "consult",
         state: "running", // 前のサーバが落ちて running のまま残った体
         started_at: new Date().toISOString(),
         cwd: ws.plainDir,
@@ -644,11 +644,11 @@ describe("PID 再利用への耐性", () => {
 
     const server = startServer(ws.env());
     try {
-      const status = await server.call("codex_status", { run_id: runId });
+      const status = await server.call("status", { run_id: runId });
       assert.match(textOf(status.result), /state=completed\(推定\)/, textOf(status.result));
 
       // 「まだ動いています」で無限にポーリングさせない
-      const result = await server.call("codex_result", { run_id: runId });
+      const result = await server.call("result", { run_id: runId });
       const text = textOf(result.result);
       assert.ok(!text.includes("まだ動いています"), text);
       assert.match(text, /FINAL/);
@@ -675,10 +675,10 @@ describe("記録の保護", () => {
     execFileSync("mkdir", ["-p", dir]);
     writeFileSync(join(dir, "meta.json"), "{ this is not json");
 
-    const server = startServer(ws.env({ CODEX_MCP_MAX_RUNS: "1" }));
+    const server = startServer(ws.env({ AGENT_EXEC_MAX_RUNS: "1" }));
     try {
       // prune は起動時と run 完了ごとに走る
-      await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir }, {}, 20_000);
+      await server.call("consult", { prompt: "x", cwd: ws.plainDir }, {}, 20_000);
       assert.ok(existsSync(join(dir, "meta.json")), "壊れた meta の run が消された");
     } finally {
       server.close();
@@ -690,16 +690,16 @@ describe("記録の保護", () => {
     const SESSION_B = "01a0bbbb-0000-7000-8000-000000000002";
     // 保持 1 件・猶予と遅延をほぼ 0 にして、確実に prune させる
     const base = {
-      CODEX_MCP_MAX_RUNS: "1",
-      CODEX_MCP_PRUNE_GRACE_MS: "1",
-      CODEX_MCP_PRUNE_DELAY_MS: "1",
+      AGENT_EXEC_MAX_RUNS: "1",
+      AGENT_EXEC_PRUNE_GRACE_MS: "1",
+      AGENT_EXEC_PRUNE_DELAY_MS: "1",
     };
 
     // セッション A を作る
     const serverA = startServer(ws.env({ ...base, CODEX_FAKE_THREAD_ID: SESSION_A }));
     let runA;
     try {
-      const res = await serverA.call("codex_consult", { prompt: "最初", cwd: ws.plainDir }, {}, 20_000);
+      const res = await serverA.call("consult", { prompt: "最初", cwd: ws.plainDir }, {}, 20_000);
       runA = runIdOf(textOf(res.result));
       assert.ok(runA, textOf(res.result));
     } finally {
@@ -710,7 +710,7 @@ describe("記録の保護", () => {
     const serverB = startServer(ws.env({ ...base, CODEX_FAKE_THREAD_ID: SESSION_B }));
     try {
       for (const prompt of ["次", "その次"]) {
-        await serverB.call("codex_consult", { prompt, cwd: ws.plainDir }, {}, 20_000);
+        await serverB.call("consult", { prompt, cwd: ws.plainDir }, {}, 20_000);
         await new Promise((r) => setTimeout(r, 400));
       }
       assert.ok(!existsSync(join(ws.runsDir, runA)), `A の run 本体が残っている: ${runA}`);
@@ -721,7 +721,7 @@ describe("記録の保護", () => {
       );
       assert.equal(indexed.run_id, runA);
       const res = await serverB.call(
-        "codex_consult",
+        "consult",
         { prompt: "続き", cwd: ws.plainDir, resume_session_id: SESSION_A },
         {},
         20_000,
@@ -735,9 +735,9 @@ describe("記録の保護", () => {
   it("tool をまたぐ継続は拒否せず、sandbox が変わることを明示する", async () => {
     const server = startServer(ws.env());
     try {
-      await server.call("codex_consult", { prompt: "調査", cwd: ws.gitDir }, {}, 20_000);
+      await server.call("consult", { prompt: "調査", cwd: ws.gitDir }, {}, 20_000);
       const res = await server.call(
-        "codex_apply",
+        "apply",
         { prompt: "直して", cwd: ws.gitDir, resume_session_id: FAKE_THREAD_ID },
         {},
         20_000,
@@ -745,7 +745,7 @@ describe("記録の保護", () => {
       assert.equal(res.result.isError, undefined, textOf(res.result));
       assert.match(
         textOf(res.result),
-        /codex_consult のセッションを codex_apply = workspace-write で継続します/,
+        /consult のセッションを apply = workspace-write で継続します/,
       );
     } finally {
       server.close();
@@ -766,15 +766,15 @@ describe("保持上限と記録の生存", () => {
     // 応答を組み立て中の run を消すと、報告が失われる。
     const server = startServer(
       ws.env({
-        CODEX_MCP_MAX_RUNS: "1",
-        CODEX_MCP_MAX_CONCURRENCY: "1",
+        AGENT_EXEC_MAX_RUNS: "1",
+        AGENT_EXEC_MAX_CONCURRENCY: "1",
         CODEX_FAKE_SLEEP: "0.5",
       }),
     );
     try {
       const results = await Promise.all(
         ["1本目", "2本目", "3本目"].map((tag) =>
-          server.call("codex_consult", { prompt: tag, cwd: ws.plainDir }, {}, 40_000),
+          server.call("consult", { prompt: tag, cwd: ws.plainDir }, {}, 40_000),
         ),
       );
       for (const res of results) {
@@ -792,10 +792,10 @@ describe("保持上限と記録の生存", () => {
       ws.env({ CODEX_FAKE_WEIRD: "1", CODEX_FAKE_NO_OUTPUT: "1" }),
     );
     try {
-      const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir }, {}, 40_000);
+      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir }, {}, 40_000);
       const runId = runIdOf(textOf(res.result));
       // events.jsonl では 300KB の行が縮められるが、報告は messages.jsonl に残る
-      const result = await server.call("codex_result", { run_id: runId });
+      const result = await server.call("result", { run_id: runId });
       const text = textOf(result.result);
       assert.match(text, /AAAA/, text.slice(0, 400));
       assert.match(text, /途中のメッセージ/);
@@ -807,12 +807,12 @@ describe("保持上限と記録の生存", () => {
   it("失敗した run は後から取っても isError になる", async () => {
     const server = startServer(ws.env({ CODEX_FAKE_EXIT: "3", CODEX_FAKE_STDERR: "boom" }));
     try {
-      const first = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+      const first = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       assert.equal(first.result.isError, true);
       const runId = runIdOf(textOf(first.result));
 
       // 同期応答と、後から取る結果で成否判定が食い違わないこと
-      const later = await server.call("codex_result", { run_id: runId });
+      const later = await server.call("result", { run_id: runId });
       assert.equal(later.result.isError, true, textOf(later.result));
       assert.match(textOf(later.result), /failed で終わっています（exit=3/);
       assert.match(textOf(later.result), /boom/);
@@ -828,7 +828,7 @@ describe("同じ repo での並行 apply", () => {
 
   before(() => {
     ws = makeWorkspace("repolock");
-    server = startServer(ws.env({ CODEX_FAKE_SLEEP: "3", CODEX_MCP_MAX_CONCURRENCY: "3" }));
+    server = startServer(ws.env({ CODEX_FAKE_SLEEP: "3", AGENT_EXEC_MAX_CONCURRENCY: "3" }));
   });
   after(() => {
     server.close();
@@ -837,7 +837,7 @@ describe("同じ repo での並行 apply", () => {
 
   it("同じリポジトリでは 1 本に制限する", async () => {
     // 1本目を切り離して、走らせたままにする
-    const first = await server.call("codex_apply", {
+    const first = await server.call("apply", {
       prompt: "長い作業",
       cwd: ws.gitDir,
       timeout_ms: 1200,
@@ -846,14 +846,14 @@ describe("同じ repo での並行 apply", () => {
     const runId = runIdOf(textOf(first.result));
 
     // 同じ repo への 2 本目は弾く（差分がどちらのものか分からなくなるため）
-    const second = await server.call("codex_apply", { prompt: "別の作業", cwd: ws.gitDir });
+    const second = await server.call("apply", { prompt: "別の作業", cwd: ws.gitDir });
     assert.equal(second.result.isError, true, textOf(second.result));
-    assert.match(textOf(second.result), /同じリポジトリで codex_apply が実行中/);
+    assert.match(textOf(second.result), /同じリポジトリで apply が実行中/);
     assert.match(textOf(second.result), new RegExp(runId));
 
     // 読むだけの consult は並行して使える
     const consult = await server.call(
-      "codex_consult",
+      "consult",
       { prompt: "調べて", cwd: ws.gitDir, timeout_ms: 20_000 },
       {},
       40_000,
@@ -861,8 +861,8 @@ describe("同じ repo での並行 apply", () => {
     assert.equal(consult.result.isError, undefined, textOf(consult.result));
 
     // 1本目が終われば、次の apply は通る
-    await server.call("codex_result", { run_id: runId, wait_ms: 20_000 }, {}, 40_000);
-    const third = await server.call("codex_apply", { prompt: "次の作業", cwd: ws.gitDir }, {}, 40_000);
+    await server.call("result", { run_id: runId, wait_ms: 20_000 }, {}, 40_000);
+    const third = await server.call("apply", { prompt: "次の作業", cwd: ws.gitDir }, {}, 40_000);
     assert.equal(third.result.isError, undefined, textOf(third.result));
   });
 });
@@ -882,7 +882,7 @@ describe("codex 側のエラー", () => {
       ws.env({ CODEX_FAKE_TURN_FAILED: message, CODEX_FAKE_NO_OUTPUT: "1" }),
     );
     try {
-      const res = await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       const text = textOf(res.result);
       assert.equal(res.result.isError, true, text);
       // 「報告を返しませんでした」では原因が分からない

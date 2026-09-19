@@ -1,6 +1,25 @@
-# codex-exec MCP サーバ
+# agent-exec MCP サーバ
 
-Codex CLI (`codex exec`) を MCP の tool として Claude Code へ公開する stdio サーバ。
+エージェント CLI を MCP の tool として Claude Code へ公開する stdio サーバ。
+現時点で動かせるのは Codex CLI (`codex exec`) だけ。
+
+## 構成
+
+CLI 固有の部分はアダプタに閉じてあり、実行の骨格（起動・監視・打ち切り・記録・
+同時実行）はどの CLI にも依存しない。
+
+```
+server.mjs              MCP プロトコル・tool 定義・引数検証・応答の組み立て
+lib/engine.mjs          プロセスの起動/監視/打ち切り/完了判定/孤児回収と永続化
+lib/git.mjs             git の状態取得と差分
+lib/runs.mjs            run の記録
+lib/platform.mjs        プロセスの同定（OS 差の吸収）
+lib/env.mjs             環境変数の読み出し（旧名の互換込み）
+lib/backends/codex.mjs  codex exec 固有（argv 組み立て・イベント解釈・モデル一覧）
+```
+
+アダプタは `runs.mjs` も `child_process` も import しない。永続化も spawn もせず、
+純関数だけを公開する（argv 組み立てとイベント解釈が spawn 無しでテストできる）。
 
 ## 背景
 
@@ -16,25 +35,25 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 
 | tool | 役割 |
 |---|---|
-| `codex_consult` | read-only で相談する。調査・レビュー・設計相談 |
-| `codex_apply` | workspace-write で作業させる。git 管理下のみ |
-| `codex_status` | 切り離した run の進捗を見る |
-| `codex_result` | 切り離した run の報告を取る |
-| `codex_runs` | 最近の run を一覧する |
+| `consult` | read-only で相談する。調査・レビュー・設計相談 |
+| `apply` | workspace-write で作業させる。git 管理下のみ |
+| `status` | 切り離した run の進捗を見る |
+| `result` | 切り離した run の報告を取る |
+| `runs` | 最近の run を一覧する |
 
-### codex_consult / codex_apply
+### consult / apply
 
 | 引数 | 必須 | 説明 |
 |---|---|---|
 | `prompt` | ✓ | Codex への指示 |
-| `cwd` | `codex_apply` のみ | 作業ディレクトリ（絶対パス）。symlink と `..` は実体へ正規化する |
+| `cwd` | `apply` のみ | 作業ディレクトリ（絶対パス）。symlink と `..` は実体へ正規化する |
 | `timeout_ms` | | **同期で待つ上限**（既定 600000 = 10分、上限 1500000 = 25分）。待ち行列と実行待ちの合計がこれを超えない（`kill_on_timeout: true` のときは打ち切り待ちが最大 10 秒加わる）。超えても codex は止めない |
 | `delegate` | | codex がサブエージェントへ委譲し独立レビューまで自走することを許すか。既定は tool ごと（下記） |
 | `resume_session_id` | | 前回の `session_id`。会話を継続する |
 | `kill_on_timeout` | | true なら `timeout_ms` で打ち切る（既定 false） |
-| `scope` | `codex_apply` のみ | `strict`（既定）/ `open` |
+| `scope` | `apply` のみ | `strict`（既定）/ `open` |
 
-`codex_apply` を git 管理下に限っているのは、Codex の変更を `git diff` で確認して戻せる
+`apply` を git 管理下に限っているのは、Codex の変更を `git diff` で確認して戻せる
 状態を保つため。判定は `git rev-parse --show-toplevel` で行う（`.git` の存在だけを見ると、
 空の `.git` ディレクトリ——実際に `/tmp` にあった——を誤ってリポジトリと見なす）。
 
@@ -42,17 +61,17 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 
 | tool | モデル | effort |
 |---|---|---|
-| `codex_consult` | `gpt-6-astra` | `xhigh` |
-| `codex_apply` | `gpt-5.6-luna` | `max` |
+| `consult` | `gpt-6-astra` | `xhigh` |
+| `apply` | `gpt-5.6-luna` | `max` |
 
-コードを書くのは `codex_apply` だけなので、そこだけ別のモデルにしている。レビューを
+コードを書くのは `apply` だけなので、そこだけ別のモデルにしている。レビューを
 別系統のモデル（astra）に任せることで、書いたモデルと同じ癖で見落とすのを避ける。
 
 **`model` と `reasoning_effort` は tool の引数ではない。** 呼び出し側の LLM からは
 指定できない（渡すと「未知の引数です」で弾く）。
 
 そうしたのは、**呼び出し側が既定を無視するのを実測したため**である。保持していた 25 run
-すべてが `gpt-6-astra` で、`codex_apply` の既定 `gpt-5.6-luna` は一度も発動していなかった
+すべてが `gpt-6-astra` で、`apply` の既定 `gpt-5.6-luna` は一度も発動していなかった
 （呼び出し側が毎回 `model` を明示していた）。effort も 4 run で勝手に下げられていた。
 どのモデルにいくら払うかは利用者が決めることなので、入口を塞ぐ。
 
@@ -93,7 +112,7 @@ TOOL_MODES の既定      ← 全端末の基準
 4.0.0 まで `codex_verify` があった。対象を読めるが書けないサンドボックスでテストを
 走らせる tool で、「実装者の自己申告を信じない」ための独立した検証役だった。
 
-**保持していた 25 run で一度も使われなかった**（`codex_apply` 13 / `codex_consult` 12 /
+**保持していた 25 run で一度も使われなかった**（`apply` 13 / `consult` 12 /
 `codex_verify` 0）。振り返ると、この tool には 3 つ問題があった:
 
 1. **出自が役割ではなく技術的制約だった。** `read-only` では uv や pytest がキャッシュを
@@ -102,16 +121,16 @@ TOOL_MODES の既定      ← 全端末の基準
 2. **「実行するだけ」なら呼び出し側の Bash が圧倒的に安い。** 同じマシンで動く以上、
    できることは変わらない。model 1 run（数分 + 枠）を使う理由が無い。
 3. **自己申告の検証は、すでに git 差分が担っていた。** テストを緩める・xfail を付ける
-   といった改変は、`codex_apply` が応答に添える変更ファイル一覧と `diff --stat` に出る。
+   といった改変は、`apply` が応答に添える変更ファイル一覧と `diff --stat` に出る。
 
-代わりに `codex_apply` は、prompt の末尾で**テストの実行と申告**を求める:
+代わりに `apply` は、prompt の末尾で**テストの実行と申告**を求める:
 
 > 変更後はプロジェクト規則に従ってテストを実行し、実行したコマンドと結果（件数・
 > 失敗の有無）を報告に含めてください。実行しなかった場合は、その理由を報告に明記して
 > ください。
 
 実行したコマンドを書かせるのが肝で、呼び出し側は同じコマンドを 1 回打つだけで裏取り
-できる。`scope: "open"` でも外れない（範囲の指示とは別の話なので）。`codex_consult` には
+できる。`scope: "open"` でも外れない（範囲の指示とは別の話なので）。`consult` には
 添えない——read-only ではそもそも走らないため。
 
 ## クライアント側のタイムアウト
@@ -120,10 +139,10 @@ TOOL_MODES の既定      ← 全端末の基準
 abort する**（実運用で `wait_ms=1800000` を指定して 1,813 秒の abort を観測）。そのため:
 
 - `timeout_ms` と `wait_ms` の上限を **1,500,000 ms（25分）** に切っている
-- `codex_result` の待機中も `notifications/progress` を 15 秒ごとに送る
+- `result` の待機中も `notifications/progress` を 15 秒ごとに送る
   （`_meta.progressToken` がある場合）
 
-25 分を超えて待ちたい場合は、切り離したうえで `codex_result` を繰り返し呼ぶ。
+25 分を超えて待ちたい場合は、切り離したうえで `result` を繰り返し呼ぶ。
 
 ## サブエージェントへの委譲
 
@@ -163,8 +182,8 @@ codex は内部でサブエージェントへ委譲し、独立レビューま�
 
 | tool | `delegate` の既定 | 理由 |
 |---|---|---|
-| `codex_consult` | `false` | レビューは呼び出し側が回すので、内部で自走させない |
-| `codex_apply` | `false` | 実装は自分で進めてもらう |
+| `consult` | `false` | レビューは呼び出し側が回すので、内部で自走させない |
+| `apply` | `false` | 実装は自分で進めてもらう |
 
 どちらも既定で委譲しない。委譲させたいときだけ `delegate: true` を渡す。
 
@@ -176,7 +195,7 @@ codex は内部でサブエージェントへ委譲し、独立レビューま�
 **codex は `CLAUDE.md` を読まない。** 読むのは `AGENTS.md`（とグローバルの
 `~/.codex/AGENTS.md`）。sandbox で見えていないのではなく、探すファイル名が違う。
 
-**codex は cwd から project doc を探す。** `codex_consult` / `codex_apply` はどちらも
+**codex は cwd から project doc を探す。** `consult` / `apply` はどちらも
 cwd が対象ディレクトリなので、対象の `AGENTS.md` はそのまま届く（実測で確認）。
 `codex_verify` は cwd が使い捨ての workspace だったためこれが届かず、対象の `AGENTS.md`
 をコピーして持ち込んでいたが、tool ごと廃したのでその仕掛けも無くなった。
@@ -191,13 +210,13 @@ cwd が対象ディレクトリなので、対象の `AGENTS.md` はそのまま
 走り続け、応答には `run_id` とそこまでの報告が返る:
 
 ```
-[codex_apply] run_id=20260914-013045-a3f9 ... elapsed=1800.0s
+[apply] run_id=20260914-013045-a3f9 ... elapsed=1800.0s
 session_id=01a09c8f-...（続きは resume_session_id に渡す）
 
 ⏳ 同期で待つ上限（1800000 ms）に達したので切り離しました。codex は実行を続けています。
 進捗: command_execution=42 agent_message=3 / 直近=command_execution
-記録: ~/.claude/codex-exec/runs/20260914-013045-a3f9
-続きは codex_result(run_id="20260914-013045-a3f9") で取得できます。
+記録: ~/.claude/agent-exec/runs/20260914-013045-a3f9
+続きは result(run_id="20260914-013045-a3f9") で取得できます。
 
 --- ここまでの報告（途中のメッセージ）---
 ...
@@ -216,7 +235,7 @@ session_id=01a09c8f-...（続きは resume_session_id に渡す）
 すべての実行は次の場所に残る。MCP の応答が失われても、後から読める。
 
 ```
-~/.claude/codex-exec/runs/
+~/.claude/agent-exec/runs/
 ├── <run_id>/
 │   ├── meta.json         # 引数・状態・pid・thread_id・usage・git 差分
 │   ├── prompt.txt        # 実際に渡したプロンプト（scope の付加ぶんを含む）
@@ -232,7 +251,7 @@ session_id=01a09c8f-...（続きは resume_session_id に渡す）
 本文を復元できない。`messages.jsonl` は `agent_message` だけを貯めるので、打ち切られても
 そこまでの報告を必ず取り出せる。
 
-サーバを再起動して追跡が切れた run も、`codex_status` / `codex_result` が
+サーバを再起動して追跡が切れた run も、`status` / `result` が
 `events.jsonl` から状態と報告を復元する。
 
 ## 会話の継続
@@ -266,12 +285,12 @@ session_id=01a09c8f-...（続きは resume_session_id に渡す）
 （temp + rename が保証するのは書き換えの不可分性だけで、読み書きの排他ではない）。
 
 tool をまたぐ継続（調査 → 修正、修正 → レビュー）は自然なので拒否しない。ただし
-sandbox が変わるので、応答に「codex_consult のセッションを codex_apply = workspace-write
+sandbox が変わるので、応答に「consult のセッションを apply = workspace-write
 で継続します」と明示する。
 
 ## 変更内容の確認
 
-`codex_apply` は**終了時点の git 状態**（変更ファイル一覧と `diff --stat`）を応答に添える。
+`apply` は**終了時点の git 状態**（変更ファイル一覧と `diff --stat`）を応答に添える。
 codex のイベント形式に依存しないので、打ち切られた場合でも取得できる。
 
 「この run が変えたぶん」だけを厳密に切り出すには開始時点の内容そのものを保存する必要が
@@ -282,7 +301,7 @@ codex がそのファイルを追加編集した場合に消えてしまう（ru
 
 ## 作業範囲
 
-`codex_apply` は既定（`scope: "strict"`）で、prompt の末尾に次の指示を添える:
+`apply` は既定（`scope: "strict"`）で、prompt の末尾に次の指示を添える:
 
 > 指示された範囲のみを変更してください。範囲外で問題や弱点を見つけた場合は、その場で
 > 修正せず、報告に「範囲外の気づき」として記載してください。
@@ -293,22 +312,22 @@ codex がそのファイルを追加編集した場合に消えてしまう（ru
 ## 登録
 
 ```bash
-claude mcp add codex -s user -- node ~/projects/agent-tools/mcp-servers/codex-exec/server.mjs
+claude mcp add agent -s user -- node ~/projects/agent-tools/mcp-servers/agent-exec/server.mjs
 claude mcp list   # ✔ Connected を確認
 ```
 
-`codex_consult` は read-only なので `permissions.allow` に入れてよい。`codex_apply` は
+`consult` は read-only なので `permissions.allow` に入れてよい。`apply` は
 書き込みが走るため、都度承認を勧める。
 
 ## テスト
 
 ```bash
-cd ~/projects/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs test/runs.test.mjs
+cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/protocol.test.mjs test/runs.test.mjs
 ```
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
-83 件。
+85 件。
 
 **Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
 実行できない（`spawn EFTYPE`）。spawn を伴わない検証は通るが、それ以外は全滅する。
@@ -330,23 +349,24 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 4.0.0
+現在: 5.0.0
 ```
 
 | version | 変更 |
 |---|---|
-| 1.0.0 | 初版（codex_consult / codex_apply の 2 ツール、同期のみ） |
+| 1.0.0 | 初版（consult / apply の 2 ツール、同期のみ） |
 | 2.0.0 | `--json` へ移行、run の永続化、切り離し（detach）、会話継続、status/result/runs |
 | 3.0.0 | `codex_verify` を追加、同じ repo での並行 apply を拒否 |
-| 3.1.0 | `codex_apply` の既定を gpt-5.6-luna / max に変更 |
+| 3.1.0 | `apply` の既定を gpt-5.6-luna / max に変更 |
 | 3.2.0 | `codex_verify` の既定 effort を low に変更 |
-| 3.3.0 | 同期で待つ上限を 25 分へ引き下げ、`codex_result` の待機中も進捗通知を送る |
+| 3.3.0 | 同期で待つ上限を 25 分へ引き下げ、`result` の待機中も進捗通知を送る |
 | 3.4.0 | `delegate` 引数を追加、codex 側のエラー（turn.failed）を応答に載せる |
 | 3.5.0 | `codex_verify` が対象の AGENTS.md を workspace へ持ち込むよう修正 |
 | 3.6.0 | `delegate: false` の指示文で、AGENTS.md の委譲指示との競合を明示的に解く |
-| 3.7.0 | `codex_consult` の `delegate` も既定 false に（3 ツールとも委譲しない） |
+| 3.7.0 | `consult` の `delegate` も既定 false に（3 ツールとも委譲しない） |
 | 3.8.0 / 3.9.0 | （記録漏れ。コードは 3.9.0 だったが、この表は 3.7.0 で止まっていた） |
-| 4.0.0 | `codex_verify` を削除。`model` / `reasoning_effort` を tool 引数から外し、環境変数のみに。`codex_apply` にテスト実行と申告の指示を追加 |
+| 4.0.0 | `codex_verify` を削除。`model` / `reasoning_effort` を tool 引数から外し、環境変数のみに。`apply` にテスト実行と申告の指示を追加 |
+| 5.0.0 | `codex-exec` → `agent-exec` に改名（tool 名も `consult` / `apply` / …）。CLI 固有の部分を `lib/backends/` のアダプタへ分離。環境変数を `AGENT_EXEC_*` へ（旧名も読む）。生死判定を 3 値化 |
 
 ## 環境変数
 
@@ -354,16 +374,29 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 |---|---|---|
 | `CODEX_BIN` | `codex` | codex 実行ファイル |
 | `CODEX_HOME` | `~/.codex` | `models_cache.json` の探索先 |
-| `CODEX_MCP_RUNS_DIR` | `~/.claude/codex-exec/runs` | run の記録先（clone の外に置く） |
-| `CODEX_MCP_CONSULT_MODEL` | `gpt-6-astra` | `codex_consult` のモデル |
-| `CODEX_MCP_CONSULT_EFFORT` | `xhigh` | `codex_consult` の effort |
-| `CODEX_MCP_APPLY_MODEL` | `gpt-5.6-luna` | `codex_apply` のモデル |
-| `CODEX_MCP_APPLY_EFFORT` | `max` | `codex_apply` の effort |
-| `CODEX_MCP_MAX_CONCURRENCY` | `3` | 同時に走らせる codex の本数 |
-| `CODEX_MCP_MAX_RUNS` | `50` | 保持する run の件数 |
-| `CODEX_MCP_PRUNE_GRACE_MS` | `120000` | 完了直後の run を保護する時間 |
-| `CODEX_MCP_PRUNE_DELAY_MS` | `10000` | run 完了から prune までの遅延 |
-| `CODEX_MCP_HARD_LIMIT_MS` | `7200000` | 1 run の絶対上限（2時間）。超えたら強制的に打ち切る |
+| `AGENT_EXEC_RUNS_DIR` | `~/.claude/agent-exec/runs` | run の記録先（clone の外に置く） |
+| `AGENT_EXEC_CONSULT_MODEL` | `gpt-6-astra` | `consult` のモデル |
+| `AGENT_EXEC_CONSULT_EFFORT` | `xhigh` | `consult` の effort |
+| `AGENT_EXEC_APPLY_MODEL` | `gpt-5.6-luna` | `apply` のモデル |
+| `AGENT_EXEC_APPLY_EFFORT` | `max` | `apply` の effort |
+| `AGENT_EXEC_MAX_CONCURRENCY` | `3` | 同時に走らせる codex の本数 |
+| `AGENT_EXEC_MAX_RUNS` | `50` | 保持する run の件数 |
+| `AGENT_EXEC_PRUNE_GRACE_MS` | `120000` | 完了直後の run を保護する時間 |
+| `AGENT_EXEC_PRUNE_DELAY_MS` | `10000` | run 完了から prune までの遅延 |
+| `AGENT_EXEC_HARD_LIMIT_MS` | `7200000` | 1 run の絶対上限（2時間）。超えたら強制的に打ち切る |
+
+**5.0.0 で `CODEX_MCP_*` を `AGENT_EXEC_*` に改名した。** 旧名も読むが、読んだときは
+stderr に warning を出す。端末ごとにセットアップする運用では「片方の端末だけ旧名のまま」
+が必ず起きるので、黙って無視せず気づけるようにしてある。`CODEX_BIN` と `CODEX_HOME` は
+codex というバックエンド固有の設定なので改名していない。
+
+記録先も `~/.claude/codex-exec/runs` → `~/.claude/agent-exec/runs` に変わった。新パスが
+無くて旧パスがある端末では**旧パスを使い続ける**（勝手に切り替えると、既存の run と
+セッション索引が消えたように見えて resume が全部切れる）。移行は `mv` 一発:
+
+```bash
+mv ~/.claude/codex-exec ~/.claude/agent-exec
+```
 
 モデル / effort の環境変数に**空文字**を渡すと「既定なし」になり、`~/.codex/config.toml`
 に委ねる。
@@ -373,10 +406,10 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 直接編集する:
 
 ```bash
-claude mcp remove codex -s user
-claude mcp add codex -s user \
-  -e CODEX_MCP_APPLY_MODEL=gpt-6-astra \
-  -- node ~/projects/agent-tools/mcp-servers/codex-exec/server.mjs
+claude mcp remove agent -s user
+claude mcp add agent -s user \
+  -e AGENT_EXEC_APPLY_MODEL=gpt-6-astra \
+  -- node ~/projects/agent-tools/mcp-servers/agent-exec/server.mjs
 ```
 
 全端末で揃えたい場合はここではなく `TOOL_MODES` を変える。
@@ -400,12 +433,25 @@ claude mcp add codex -s user \
   (1) `boot_id` が現在と一致する、(2) `server_pid` が死んでいる（＝他のセッションが
   見ていない）、(3) `/proc/<pid>/cmdline` に `run_id` が含まれる（codex には必ず
   `-o <runs>/<run_id>/last-message.txt` が渡るので、偶然一致しない目印になる）。
-- **走っているかの判定**: 追跡が切れた run は、まず `events.jsonl` の `turn.completed`
-  を見る。完了の証跡があればそれが最も確かなので「完了」とする。無ければ上と同じ
-  身元確認つきの生存判定へ進み、生きていれば `codex_result` は「まだ動いています」と
-  返す。逆順にすると、PID 再利用で**終わった run が永久に実行中に見え**、呼び出し側が
-  無限にポーリングする。「報告が無い」と断言するのも同様に危険で、呼び出し側が失敗と
-  判断して高価な（apply なら破壊的な）再実行に走る。
+- **走っているかの判定**: 追跡が切れた run は、まず終端の証跡（`meta.terminal_seen`、
+  無ければ events）を見る。証跡があればそれが最も確かなので「完了」とする。無ければ
+  身元確認つきの生存判定へ進む。逆順にすると、PID 再利用で**終わった run が永久に
+  実行中に見え**、呼び出し側が無限にポーリングする。
+- **生死判定は 3 値**: `alive` / `dead` / **`unknown`**。マーカーを argv に確認できない
+  まま起動した run は `unknown` を返す。ここで `dead` に倒すと、実際には走っている run に
+  「報告が記録されていません」と**断言**してしまい、呼び出し側が失敗と判断して高価な
+  （apply なら破壊的な）再実行に走る。prune は `unknown` を残し、孤児回収は触らず、
+  `status` / `result` は「まだ動いているかもしれません」と返す。
+- **argv マーカーはアダプタの義務**: 孤児回収の身元確認は「そのプロセスの argv に
+  run_id が含まれる」ことに依存している。codex では `-o <runs>/<run_id>/last-message.txt`
+  が偶然それを保証していた。アダプタに `marker` を申告させ、**engine が起動前に argv へ
+  実際に現れるか検証する**。満たさなければ `reclaimable: false` を記録して警告し、
+  その run は回収対象から外す（誤爆して無関係なプロセスグループを巻き込むより、
+  取り逃がす方を選ぶ）。
+- **終端フラグの後方互換**: 5.0.0 で `meta.turn_completed`（codex のイベント名がそのまま
+  漏れていた）を `meta.terminal_seen` に改めた。書くときは両方、読むときも両方見る。
+  これは「PID 再利用で終わった run が永久に実行中に見える」問題への唯一の対策なので、
+  移行中に落とすと呼び出し側が無限ポーリングする。
 - **記録の保護**: `meta.json` と セッション索引は一時ファイル + `rename` で書き換える
   （同一 FS の rename は不可分なので、他プロセスが途中の状態を読まない）。prune は
   meta が読めない run を消さない — 書き込み途中かもしれないものを消す側に倒すと、
@@ -430,7 +476,7 @@ claude mcp add codex -s user \
 - **同時実行**: 既定 3 本。切り離した run もスロットを保持する（codex は走り続けている
   ため）。空きを `timeout_ms` 待っても取れなければエラーを返す。
 - **同じ repo での並行 apply**: 拒否する。同時に走らせると互いの変更を奪い合ううえ、
-  git 差分がどちらのものか分からなくなる。`codex_consult` は読むだけなので並行して使える。
+  git 差分がどちらのものか分からなくなる。`consult` は読むだけなので並行して使える。
 - **stdout の純度**: MCP の stdout は JSON-RPC 専用。ログは必ず stderr へ出すこと
   （テストが全 stdout 行を JSON-RPC としてパースできることを検証している）。
   `git` の呼び出しも `stdio: [ignore, pipe, ignore]` で stderr を捨てている。
@@ -443,7 +489,7 @@ claude mcp add codex -s user \
   作るので、採番が衝突しても既存の run を上書きしない。
 - **サイズの上限**: codex の stdout は改行が来ないまま 4 MB を超えたら破棄、
   `events.jsonl` の 1 行は 256 KB で切り詰め、読み出しは末尾 2 MB だけ。
-  長時間の apply でも `codex_status` が重くならないようにするため。
+  長時間の apply でも `status` が重くならないようにするため。
 - **未知ツール・引数不正**: JSON-RPC の `-32602` ではなく `isError: true` の結果として返す。
   呼び出し側の LLM が内容を読んで自己修正できるようにするため（意図的な選択）。
 - **イベントの解釈**: 実測できているのは `thread.started` / `turn.started` /

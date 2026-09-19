@@ -1,0 +1,415 @@
+// エージェント CLI の起動・監視・打ち切り・記録。どの CLI を動かすかは知らない。
+//
+// アダプタから受け取るのは「argv と env をどう組むか」と「イベント 1 行から何が
+// 読み取れるか」だけで、永続化（meta / messages / sessions 索引）はすべてここで行う。
+// アダプタを純関数に保つと、argv とイベント解釈が spawn 無しでテストできる。
+
+import { spawn } from "node:child_process";
+
+import { readEnvInt } from "./env.mjs";
+import {
+  canIdentifyProcesses,
+  currentBootId,
+  isAlive,
+  killTree,
+  processHasMarker,
+  processStartTime,
+  spawnExtras,
+} from "./platform.mjs";
+import {
+  appendEvent,
+  appendMessage,
+  listRunIds,
+  readMeta,
+  recordSession,
+  updateMeta,
+  writeArtifact,
+} from "./runs.mjs";
+
+const MAX_STDERR_CHARS = 16_000;
+const KILL_GRACE_MS = 3_000; // SIGTERM から SIGKILL までの猶予
+const KILL_SETTLE_MS = 2_000; // SIGKILL 後に stdio が閉じるのを待つ上限
+const DRAIN_AFTER_EXIT_MS = 1_000; // exit 後、孫が握る stdout を待つ上限
+// 改行の来ない巨大な stdout でメモリを食い潰さないための上限。
+const MAX_STDOUT_BUFFER_CHARS = 4 * 1024 * 1024;
+// events.jsonl に残す 1 行の上限。超えた行は切り詰めて記録する。
+const MAX_EVENT_LINE_CHARS = 256 * 1024;
+// 放置された run を無限に走らせないための上限。
+const HARD_LIMIT_MS = readEnvInt(
+  "AGENT_EXEC_HARD_LIMIT_MS",
+  "CODEX_MCP_HARD_LIMIT_MS",
+  7_200_000,
+  1_000,
+);
+
+/** run_id -> 実行中レコード */
+const activeRuns = new Map();
+
+export function getActive(runId) {
+  return activeRuns.get(runId);
+}
+
+export function activeRunIds() {
+  return [...activeRuns.keys()];
+}
+
+export { currentBootId, isAlive, processStartTime } from "./platform.mjs";
+
+// meta が指すプロセスが今も生きているか。pid の生存だけでは PID 再利用と区別できないので、
+// (1) 起動時の boot_id が現在と一致する (2) pid が生きている (3) そのプロセスの
+// コマンドラインにマーカー（run_id）が入っている、の 3 つを重ねる。
+//
+// 3 値なのが要点。マーカーを確認できない起動だった run に "dead" を返すと、実際には
+// 走っている run に対して「報告が記録されていません」と断言してしまう。呼び出し側が
+// 失敗と判断して、apply なら破壊的な再実行に走る。判定できないときは "unknown" を返し、
+// 呼び出し側にその旨を伝えさせる。
+//
+// @returns {"alive"|"dead"|"unknown"}
+export function runLiveness(meta) {
+  if (!meta || !Number.isInteger(meta.pid) || !meta.run_id) return "dead";
+  const bootId = currentBootId();
+  if (bootId && meta.boot_id && meta.boot_id !== bootId) return "dead";
+  if (!isAlive(meta.pid)) return "dead";
+  // 起動時にマーカーを argv 内に確認できなかった run。pid は生きているが、それが
+  // この run のものだと言い切れない。
+  if (meta.reclaimable === false) return "unknown";
+  const marker = meta.argv_marker ?? meta.run_id;
+  return processHasMarker(meta.pid, marker) ? "alive" : "dead";
+}
+
+// prune 用。"unknown" は消さない側（残す側）に倒す。
+export function isRunAlive(meta) {
+  return runLiveness(meta) !== "dead";
+}
+
+// ---------------------------------------------------------------- イベントの適用
+
+function newProgress() {
+  return {
+    sessionId: undefined,
+    itemCounts: {},
+    messages: [],
+    failure: undefined,
+    lastItemType: undefined,
+    eventCount: 0,
+    usage: undefined,
+  };
+}
+
+// アダプタが返した delta を進捗へ反映し、必要なものだけ即時に永続化する。
+// 即時に書くのは sessionId / 終端 / failure の 3 つだけ。これらはサーバが落ちても
+// 引き継げる必要がある。
+function applyDelta(progress, delta, runId) {
+  if (!delta) return;
+  if (typeof delta.sessionId === "string") {
+    progress.sessionId = delta.sessionId;
+    // 完了を待たずに残す。サーバが落ちても session_id を引き継げるようにするため。
+    // thread_id は既存の記録が使っているキー。新しい session_id と両方書く。
+    updateMeta(runId, { thread_id: delta.sessionId, session_id: delta.sessionId });
+    const meta = readMeta(runId);
+    if (meta) {
+      // run が prune されても resume できるよう、索引は別に持つ。
+      recordSession(delta.sessionId, { run_id: runId, cwd: meta.cwd, tool: meta.tool });
+    }
+  }
+  if (typeof delta.itemType === "string") {
+    progress.itemCounts[delta.itemType] = (progress.itemCounts[delta.itemType] ?? 0) + 1;
+    progress.lastItemType = delta.itemType;
+  }
+  if (typeof delta.message === "string") {
+    progress.messages.push(delta.message);
+    appendMessage(runId, delta.message);
+  }
+  if (delta.usage) progress.usage = delta.usage;
+  if (delta.completed) {
+    // 終端を見たことを記録に残す。一覧・状態・結果のどこからでも同じ判定ができる。
+    // turn_completed は既存の記録が使っているキー。新旧の両方を書く。
+    updateMeta(runId, { terminal_seen: true, turn_completed: true });
+  }
+  if (typeof delta.failure === "string") {
+    progress.failure = delta.failure;
+    updateMeta(runId, { failure: delta.failure });
+  }
+}
+
+// ---------------------------------------------------------------- 起動と監視
+
+export function launch({ runId, adapter, argv, marker, prompt, cwd, env, onFinish }) {
+  // アダプタが申告したマーカーが本当に argv に現れるか、起動前に確かめる。
+  // ここを信用のままにすると、孤児回収と生死判定が「黙って無効化される」形で壊れる。
+  const markerOk = typeof marker === "string" && argv.some((a) => a.includes(marker));
+  if (marker && !markerOk) {
+    process.stderr.write(
+      `[${runId}] マーカー "${marker}" が argv に現れません。この run は孤児回収の対象から外します\n`,
+    );
+  }
+
+  let child;
+  try {
+    // detached: true でプロセスグループを作り、打ち切り時に孫ごと落とせるようにする。
+    child = spawn(adapter.bin(), argv, {
+      cwd,
+      env: buildChildEnv(env),
+      stdio: ["pipe", "pipe", "pipe"],
+      ...spawnExtras(),
+    });
+  } catch (err) {
+    return { spawnError: String(err?.message ?? err) };
+  }
+
+  const record = {
+    runId,
+    adapter,
+    child,
+    startedAt: Date.now(),
+    state: "running",
+    progress: newProgress(),
+    stderr: "",
+    stdoutBuffer: "",
+    exit: undefined,
+    killReason: undefined,
+    waiters: new Set(),
+  };
+  activeRuns.set(runId, record);
+  // 追跡が切れた後でも生死を判定できるよう、子の pid・管理サーバの pid・
+  // 起動時の boot_id を残す（PID 再利用と区別するため）。
+  updateMeta(runId, {
+    pid: child.pid ?? null,
+    server_pid: process.pid,
+    server_start: processStartTime(process.pid),
+    boot_id: currentBootId(),
+    backend: adapter.id,
+    argv_marker: markerOk ? marker : null,
+    reclaimable: markerOk,
+  });
+
+  const finalize = ({ code, signal }) => {
+    if (record.state !== "running") return;
+    clearTimeout(record.killTimer);
+    clearTimeout(record.settleTimer);
+    record.state = record.spawnFailed
+      ? "failed"
+      : code === 0
+        ? "completed" // 打ち切り要求と正常終了が競合しても、0 で終わったなら成功扱い
+        : record.killReason
+          ? "killed"
+          : "failed";
+    record.exit = { code: code ?? null, signal: signal ?? null };
+    clearTimeout(record.hardTimer);
+    activeRuns.delete(runId);
+    writeArtifact(runId, "stderr.log", record.stderr);
+    updateMeta(runId, {
+      state: record.state,
+      finished_at: new Date().toISOString(),
+      exit_code: record.exit.code,
+      signal: record.exit.signal,
+      thread_id: record.progress.sessionId ?? null,
+      session_id: record.progress.sessionId ?? null,
+      item_counts: record.progress.itemCounts,
+      usage: record.progress.usage ?? null,
+      note: record.spawnFailed ?? record.killReason ?? null,
+      spawn_failed: record.spawnFailed ?? null,
+    });
+    for (const waiter of record.waiters) waiter(record.state);
+    record.waiters.clear();
+    if (onFinish) {
+      try {
+        onFinish(record);
+      } catch {
+        /* 呼び出し側の都合で失敗しても run の確定は済んでいる */
+      }
+    }
+  };
+  record.finalize = finalize;
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    record.stdoutBuffer += chunk;
+    let index;
+    while ((index = record.stdoutBuffer.indexOf("\n")) >= 0) {
+      const line = record.stdoutBuffer.slice(0, index).trim();
+      record.stdoutBuffer = record.stdoutBuffer.slice(index + 1);
+      if (!line) continue;
+      // 生ログは残すが、1 行が極端に長いときは縮める。縮め方はアダプタが知っている。
+      appendEvent(
+        runId,
+        line.length > MAX_EVENT_LINE_CHARS ? adapter.shrinkEventLine(line) : line,
+      );
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue; // JSON でない行は生ログにだけ残す
+      }
+      record.progress.eventCount += 1;
+      applyDelta(record.progress, adapter.parseEvent(event), runId);
+    }
+    if (record.stdoutBuffer.length > MAX_STDOUT_BUFFER_CHARS) {
+      process.stderr.write(
+        `[${runId}] 改行の無い stdout が ${record.stdoutBuffer.length} 文字に達したため破棄しました\n`,
+      );
+      record.stdoutBuffer = "";
+    }
+  });
+
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    const combined = record.stderr + chunk;
+    record.stderr =
+      combined.length > MAX_STDERR_CHARS
+        ? combined.slice(combined.length - MAX_STDERR_CHARS)
+        : combined;
+  });
+
+  // Linux では ENOENT は同期例外ではなく error イベントで来るため、ここで拾う。
+  child.on("error", (err) => {
+    record.spawnFailed = `${adapter.id} の起動に失敗しました: ${String(err?.message ?? err)}`;
+    finalize({ code: null, signal: null });
+  });
+
+  // close は stdio が全て閉じるまで来ない。子が stdout を継いだ孫を残すと
+  // 永久に来ないため、exit を見て短い猶予で確定させる。
+  child.on("exit", (code, signal) => {
+    setTimeout(() => finalize({ code, signal }), DRAIN_AFTER_EXIT_MS).unref();
+  });
+  child.on("close", (code, signal) => finalize({ code, signal }));
+
+  record.hardTimer = setTimeout(() => {
+    killRun(runId, `上限 ${HARD_LIMIT_MS} ms に達したため打ち切りました`);
+  }, HARD_LIMIT_MS);
+  record.hardTimer.unref();
+
+  child.stdin.on("error", () => {}); // 子が先に stdin を閉じても落とさない
+  child.stdin.end(prompt);
+
+  return { record };
+}
+
+// アダプタが返した env を親の環境に重ねる。値が undefined のキーは「親から削除」を意味する
+// （親セッションの環境変数が子を誤動作させる場合に使う）。
+function buildChildEnv(env) {
+  if (!env || Object.keys(env).length === 0) return process.env;
+  const merged = { ...process.env };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
+
+// 完了を待つ。timeoutMs を過ぎたら outcome:"timeout" を返すが、run は止めない
+// （呼び出し側が detach するか killRun するかを決める）。
+export function waitFor(record, timeoutMs) {
+  return new Promise((resolve) => {
+    if (record.state !== "running") {
+      resolve(record.state);
+      return;
+    }
+    const waiter = (outcome) => {
+      clearTimeout(timer);
+      record.waiters.delete(waiter);
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => {
+      record.waiters.delete(waiter);
+      resolve("timeout");
+    }, timeoutMs);
+    record.waiters.add(waiter);
+  });
+}
+
+export function killRun(runId, reason) {
+  const record = activeRuns.get(runId);
+  if (!record) return false;
+  if (record.killTimer) return true; // 二重に呼ばれても一度しか仕掛けない
+  record.killReason = reason ?? "打ち切りました";
+  killTree(record.child.pid, "SIGTERM");
+  // 予約した SIGKILL を完了後に撃つと、PID が再利用された別のプロセスグループを
+  // 巻き込む。finalize で必ず解除し、発火時にも状態を確かめる。
+  record.killTimer = setTimeout(() => {
+    if (record.state !== "running") return;
+    killTree(record.child.pid, "SIGKILL");
+    // 孫が stdout を握ったままでも必ず確定させる
+    record.settleTimer = setTimeout(
+      () => record.finalize({ code: null, signal: "SIGKILL" }),
+      KILL_SETTLE_MS,
+    );
+    record.settleTimer.unref();
+  }, KILL_GRACE_MS);
+  record.killTimer.unref();
+  return true;
+}
+
+// 前回のサーバが SIGKILL などで落ちると、detached の子が孤児として残る。
+// 起動時に回収する。ただし別セッションのサーバが管理している run は触らない
+// （同じ runs/ を複数の Claude Code セッションが共有しうるため）。
+export function reclaimOrphans() {
+  const reclaimed = [];
+  // 身元確認ができない環境では、誤って無関係なプロセスを殺すより回収を見送る。
+  if (!canIdentifyProcesses()) return reclaimed;
+  const bootId = currentBootId();
+  for (const runId of listRunIds()) {
+    const meta = readMeta(runId);
+    if (!meta || meta.state !== "running") continue;
+    // 再起動をまたいだ run の pid は、まず別プロセスに再利用されている。触らない。
+    if (bootId && meta.boot_id && meta.boot_id !== bootId) continue;
+    // 他のサーバが見ている run は触らない。ただし server_pid も再利用されうるので、
+    // 起動時刻まで一致した場合だけ「同じサーバ」とみなす。
+    if (meta.server_pid && isAlive(meta.server_pid)) {
+      const sameServer =
+        !meta.server_start || processStartTime(meta.server_pid) === meta.server_start;
+      if (sameServer) continue;
+    }
+    // "alive" と確認できたものだけ落とす。"unknown"（マーカーを確認できない起動だった）
+    // は触らない。誤爆して他のセッションやビルドを巻き込むより、取り逃がす方を選ぶ。
+    if (runLiveness(meta) !== "alive") continue;
+    try {
+      killTree(meta.pid, "SIGKILL");
+    } catch {
+      /* すでに居ない */
+    }
+    reclaimed.push(runId);
+    updateMeta(runId, {
+      state: "killed",
+      finished_at: new Date().toISOString(),
+      note: "前回のサーバが落ちたため回収しました",
+    });
+  }
+  return reclaimed;
+}
+
+// サーバ終了時。放置すると課金が続くので、detach 済みの run も含めて落とす。
+export function shutdownAll() {
+  for (const record of activeRuns.values()) {
+    killTree(record.child.pid, "SIGKILL");
+    try {
+      updateMeta(record.runId, {
+        state: "killed",
+        finished_at: new Date().toISOString(),
+        note: "サーバ終了により打ち切り",
+      });
+    } catch {
+      /* 書けなければ諦める */
+    }
+  }
+  activeRuns.clear();
+}
+
+export function snapshot(record) {
+  return {
+    state: record.state,
+    elapsed_ms: Date.now() - record.startedAt,
+    thread_id: record.progress.sessionId ?? null,
+    event_count: record.progress.eventCount,
+    item_counts: { ...record.progress.itemCounts },
+    last_item_type: record.progress.lastItemType ?? null,
+    messages: [...record.progress.messages],
+    usage: record.progress.usage ?? null,
+    stderr_tail: record.stderr,
+    exit: record.exit ?? null,
+    kill_reason: record.killReason ?? null,
+    failure: record.progress.failure ?? null,
+    spawn_failed: record.spawnFailed ?? null,
+    alive: true,
+  };
+}
