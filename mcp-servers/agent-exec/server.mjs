@@ -18,9 +18,11 @@ import {
 import {
   activeRunIds,
   getActive,
+  isAlive,
   isRunAlive,
   killRun,
   launch,
+  processStartTime,
   reclaimOrphans,
   runLiveness,
   shutdownAll,
@@ -614,14 +616,26 @@ const PRUNE_DELAY_MS = readEnvInt(
   10_000,
 );
 
-// 保持期間を過ぎた run を捨てる。動いている run と、自分が抱えている run は残す。
+// 保持期間を過ぎた run を捨てる。動いている run と、まだ起動していない run は残す。
 function prune() {
   pruneRuns((meta) => {
     if (getActive(meta.run_id)) return true;
-    // スロット待ちなどで、まだ codex を起動していない自分の run
-    if (meta.server_pid === process.pid && !meta.pid) return true;
+    // スロット待ちなどで、まだ CLI を起動していない run。pid が無いので生死判定は
+    // 必ず "dead" になる。**自分の run だけを守ると足りない** — 同じ runs/ を複数の
+    // サーバが共有するので、他のサーバが順番待ちさせている run を消してしまう。
+    // 消えると、その run が起動した後の報告もセッション索引も行き場を失う
+    // （記録の書き込み失敗はほぼ握りつぶすので、気づく手段が無い）。
+    if (!meta.pid) return serverIsAlive(meta);
     return isRunAlive(meta);
   });
+}
+
+// その run を抱えているサーバがまだ居るか。pid は再利用されるので、孤児回収と
+// 同じく起動時刻まで一致を見る。
+function serverIsAlive(meta) {
+  if (meta.server_pid === process.pid) return true;
+  if (!Number.isInteger(meta.server_pid) || !isAlive(meta.server_pid)) return false;
+  return !meta.server_start || processStartTime(meta.server_pid) === meta.server_start;
 }
 
 // ---------------------------------------------------------------- 同時実行の調停

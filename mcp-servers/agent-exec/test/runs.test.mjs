@@ -761,6 +761,31 @@ describe("PID 再利用への耐性", () => {
       server.close();
     }
   });
+
+  // スロット待ちの run はまだ pid が無いので、生死判定は必ず dead になる。
+  // 「自分の run なら残す」だけだと、同じ runs/ を共有する**他のサーバ**が順番待ち
+  // させている run を消してしまう。消えた後で起動しても、報告もセッション索引も
+  // 行き場が無い（記録の書き込み失敗はほぼ握りつぶすので気づけない）。
+  it("他のサーバが順番待ちさせている run を prune で消さない", async () => {
+    const waitingId = "20260101-000000-000-hhhh";
+    // 生きている別サーバの代役。pid はまだ無い（CLI を起動していない）
+    const dir = writeStaleRun(waitingId, { server_pid: spawnDecoy(30) });
+    writeStaleRun("20260103-000000-000-iiii", {
+      pid: 999_998,
+      state: "completed",
+      finished_at: new Date(Date.now() - 3_600_000).toISOString(),
+    });
+
+    const server = startServer(
+      ws.env({ AGENT_EXEC_MAX_RUNS: "1", AGENT_EXEC_PRUNE_GRACE_MS: "1" }),
+    );
+    try {
+      await server.request("ping", {});
+      assert.ok(existsSync(join(dir, "meta.json")), "他サーバの待機中 run が消された");
+    } finally {
+      server.close();
+    }
+  });
 });
 
 describe("記録の保護", () => {
