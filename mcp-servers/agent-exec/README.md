@@ -442,7 +442,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 6.0.0
+現在: 6.0.1
 ```
 
 | version | 変更 |
@@ -461,6 +461,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 | 4.0.0 | `codex_verify` を削除。`model` / `reasoning_effort` を tool 引数から外し、環境変数のみに。`apply` にテスト実行と申告の指示を追加 |
 | 5.0.0 | `codex-exec` → `agent-exec` に改名（tool 名も `consult` / `apply` / …）。CLI 固有の部分を `lib/backends/` のアダプタへ分離。環境変数を `AGENT_EXEC_*` へ（旧名も読む）。生死判定を 3 値化 |
 | 6.0.0 | `claude -p` を追加。**モデル名で起動する CLI が決まる**（`backend` 引数は作らない）。claude では委譲を argv で禁止し、拒否された操作を応答に載せる。backend をまたぐ resume を拒否 |
+| 6.0.1 | Windows でコンソールウィンドウが明滅する問題を修正（`git.mjs` に `windowsHide`、`currentBootId()` をキャッシュ。prune が 25 run で PowerShell を 25 回起こしていた） |
 
 ## 環境変数
 
@@ -561,6 +562,15 @@ claude mcp add agent -s user \
 - **サーバの同定**: 孤児回収で「他のサーバが見ている run」を避ける判定は、`server_pid` の
   生存だけでなく `/proc/<pid>/stat` の起動時刻まで一致を見る。PID が再利用されていると、
   本物の孤児を永久に回収できなくなるため。
+- **Windows でコンソールを出さない**: このサーバは stdio をパイプで繋がれた子として動く
+  ので、自分のコンソールを持たない。その状態で `git.exe` や `powershell.exe` を起こすと、
+  Windows が**新しいコンソールウィンドウを作る**（画面が明滅する）。子プロセスを起こす
+  箇所には必ず `windowsHide: true` を付ける。`git.mjs` にこれが無く、`apply` のたびに
+  git を 6 回呼んでウィンドウが明滅していた。
+- **起動時刻はキャッシュする**: `currentBootId()` は Windows で PowerShell を起こすため
+  **1 回 350ms** かかる（実測）。キャッシュが無いと `prune` が保持 run の数だけ呼ぶので、
+  25 run で 9 秒近くかかっていた。このプロセスが生きている間は値が変わらないので、
+  一度引いたら覚える（`null` も「引けなかった」という結果として覚える）。
 - **git は同期実行**: `execFileSync` なので、待っている間は他の run のイベント処理も
   タイマーも止まる。タイムアウトは 5 秒。大きな repo や遅い FS では応答が引っ張られる。
 - **codex 側のエラー**: `turn.failed` / `error` イベントを拾い、API のエラー本文を

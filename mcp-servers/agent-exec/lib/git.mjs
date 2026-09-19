@@ -14,6 +14,10 @@ function gitRaw(cwd, args) {
       encoding: "utf8",
       timeout: 5_000, // 同期実行なので、長く待つとイベントループ全体が止まる
       stdio: ["ignore", "pipe", "ignore"], // git の fatal を server の stderr へ流さない
+      // このサーバは stdio をパイプで繋がれた子として動くのでコンソールを持たない。
+      // これが無いと Windows が git.exe のために新しいコンソールを作り、
+      // apply のたびにウィンドウが明滅する（1 回の apply で git を 6 回呼ぶ）。
+      windowsHide: true,
     });
   } catch {
     return undefined;

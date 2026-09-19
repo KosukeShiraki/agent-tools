@@ -48,8 +48,20 @@ export function isAlive(pid) {
 
 // ---------------------------------------------------------------- 再起動の識別
 
-// 再起動ごとに変わる値。これが違う run の pid は、まず別プロセスに再利用されている。
+// 起動時刻はこのプロセスが生きている間は変わらないので、一度引いたら覚えておく。
+//
+// キャッシュが無いと prune が保持 run の数だけ外部コマンドを起こす。Windows では
+// PowerShell の起動に 1 回 350ms かかるため、25 run で 9 秒近くかかり、
+// そのぶんコンソールウィンドウが明滅する（実測）。null も「引けなかった」という
+// 結果として覚える（毎回引き直しても同じ答えしか返らない）。
+let bootId;
+
 export function currentBootId() {
+  if (bootId === undefined) bootId = readBootId();
+  return bootId;
+}
+
+function readBootId() {
   if (IS_LINUX) {
     try {
       return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
