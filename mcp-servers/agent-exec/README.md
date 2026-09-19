@@ -66,7 +66,7 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 | `apply` | 書き込み可で作業させる。git 管理下のみ |
 | `status` | 切り離した run の進捗を見る |
 | `result` | 切り離した run の報告を取る |
-| `runs` | 最近の run を一覧する |
+| `runs` | 最近の run を一覧する。モデル・effort・所要時間・失敗理由が出る |
 
 ### consult / apply
 
@@ -225,6 +225,31 @@ AGENT_EXEC_CLAUDE_ALLOWED_TOOLS='Bash(node --test*)  Bash(uv run pytest*)'
 共有しないため）。
 
 `ANTHROPIC_*` は**消さない**。利用者がどの認証で課金するかを勝手に変えないため。
+
+## モデルの問題にどう気づくか
+
+**MCP サーバから利用者へ直接届く経路は無い。** stdout は JSON-RPC として呼び出し側の
+エージェントへ渡り、stderr はどこにも表示されない（`/mcp` の接続エラー時や `--debug`
+を除く）。つまり**利用者に届くのはエージェントが口に出したものだけ**で、そこには裁量が
+ある。起動時のルーティングログも、実質は開発時にしか見えない。
+
+そのため「利用者が聞いたらエージェントが答えられる」形を優先している。`runs` が
+モデル・effort・所要時間・失敗理由を返すのはこのためで、これが無いと正しい tool を
+呼んでも答えが返らず、エージェントが `meta.json` を自力で漁れるかどうかの運になる。
+
+```
+20260919-062802-424-rgsi  apply  state=failed  23m04s  gpt-6-astra/max (codex)  ...
+    失敗: Selected model is at capacity. Please try a different model.
+20260919-073205-880-tuab  apply  state=completed  50m53s  gpt-6-astra/max (codex)  ...
+20260919-085725-835-9gat  consult  state=completed  13m51s  gpt-6-astra/xhigh (codex)  ...
+```
+
+`limit` を増やして並べると偏りが見える。実際この記録からは「`max` は `xhigh` の 2.5 倍
+（中央値 26 分）かかっていて、失敗も `max` にだけ出ている」ことが読み取れた。1 run ずつ
+見ていても気づけない類の問題である。
+
+集計まではまだ入れていない。10〜20 件並べば人にもエージェントにも偏りは見えるので、
+足りないと分かってから足す。
 
 ## クライアント側のタイムアウト
 
@@ -415,12 +440,12 @@ claude mcp list   # ✔ Connected を確認
 ## テスト
 
 ```bash
-cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/protocol.test.mjs test/runs.test.mjs
+cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 ```
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
-132 件。
+134 件。
 
 **Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
 実行できない（`spawn EFTYPE`）。spawn を伴わない検証は通るが、それ以外は全滅する。
@@ -442,7 +467,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 6.0.1
+現在: 6.1.0
 ```
 
 | version | 変更 |
@@ -462,6 +487,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 | 5.0.0 | `codex-exec` → `agent-exec` に改名（tool 名も `consult` / `apply` / …）。CLI 固有の部分を `lib/backends/` のアダプタへ分離。環境変数を `AGENT_EXEC_*` へ（旧名も読む）。生死判定を 3 値化 |
 | 6.0.0 | `claude -p` を追加。**モデル名で起動する CLI が決まる**（`backend` 引数は作らない）。claude では委譲を argv で禁止し、拒否された操作を応答に載せる。backend をまたぐ resume を拒否 |
 | 6.0.1 | Windows でコンソールウィンドウが明滅する問題を修正（`git.mjs` に `windowsHide`、`currentBootId()` をキャッシュ。prune が 25 run で PowerShell を 25 回起こしていた） |
+| 6.1.0 | `runs` にモデル・effort・所要時間・失敗理由・記録の場所を出す（「どのモデルで問題が起きているか」を聞かれたとき、記録はあるのに答えられなかった） |
 
 ## 環境変数
 

@@ -41,11 +41,12 @@ import {
   readMessages,
   readMeta,
   runDir,
+  RUNS_ROOT,
   updateMeta,
 } from "./lib/runs.mjs";
 
 const SERVER_NAME = "agent-exec";
-const SERVER_VERSION = "6.0.1";
+const SERVER_VERSION = "6.1.0";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 // 反射してよいのはサポートしている版だけ。未知の版には自分の版を返す。
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -373,7 +374,10 @@ function toolDefinitions() {
     {
       name: "runs",
       description:
-        "最近の run を新しい順に一覧する（run_id が分からなくなったときに使う）。",
+        "最近の run を新しい順に一覧する。run_id が分からなくなったときのほか、" +
+        "**どのモデル・effort で失敗や遅延が起きているかを調べるとき**にも使う。" +
+        "各行に state・所要時間・モデル/effort・起動した CLI が出て、失敗した run には" +
+        "その理由（API のエラー本文など）が付く。limit を増やせば偏りが見える。",
       inputSchema: {
         type: "object",
         properties: {
@@ -1237,6 +1241,17 @@ async function handleResult(params) {
   return textResult(report);
 }
 
+// 所要時間。走っている最中なら開始からの経過を出す。
+function formatDuration(meta) {
+  const started = Date.parse(meta.started_at);
+  if (!Number.isFinite(started)) return "-";
+  const finished = meta.finished_at ? Date.parse(meta.finished_at) : Date.now();
+  if (!Number.isFinite(finished)) return "-";
+  const sec = Math.max(0, Math.round((finished - started) / 1000));
+  const text = sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, "0")}s`;
+  return meta.finished_at ? text : `${text}+`;
+}
+
 function handleRuns(params) {
   let limit;
   try {
@@ -1272,12 +1287,26 @@ function handleRuns(params) {
             ? "unknown（まだ動いているかもしれません）"
             : "unknown";
     }
+    // モデル・effort・所要時間・失敗理由を出す。これが無いと「どのモデルで問題が
+    // 起きているか」を聞かれたとき、記録はあるのに runs から答えられない
+    //（meta.json を自力で漁ることになり、探し当てられるかは運次第になる）。
+    const model = meta.model ?? "(CLI 既定)";
+    const effort = meta.reasoning_effort ? `/${meta.reasoning_effort}` : "";
+    const backend = meta.backend ?? "codex";
+    const failure = meta.failure
+      ? `\n    失敗: ${truncateMiddle(String(meta.failure), 200)}`
+      : "";
     return (
-      `${runId}  ${meta.tool}  state=${state}  ${meta.started_at}\n` +
-      `    cwd=${meta.cwd}  session_id=${meta.thread_id ?? "-"}`
+      `${runId}  ${meta.tool}  state=${state}  ${formatDuration(meta)}  ` +
+      `${model}${effort} (${backend})  ${meta.started_at}\n` +
+      `    cwd=${meta.cwd}  session_id=${meta.session_id ?? meta.thread_id ?? "-"}` +
+      failure
     );
   });
-  return textResult(`最近の run（新しい順）:\n${lines.join("\n")}`);
+  return textResult(
+    `最近の run（新しい順）:\n${lines.join("\n")}\n\n` +
+      `記録の実体: ${join(RUNS_ROOT, "<run_id>")}（meta.json / events.jsonl / messages.jsonl）`,
+  );
 }
 
 // ---------------------------------------------------------------- MCP ハンドラ

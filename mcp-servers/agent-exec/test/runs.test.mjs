@@ -71,6 +71,31 @@ describe("run の記録", () => {
     assert.match(text, /state=completed/);
   });
 
+  // 「どのモデルで問題が起きているか」を聞かれたとき、記録はあるのに runs から
+  // 答えられない状態だと、エージェントは meta.json を自力で漁ることになる。
+  it("モデル・effort・所要時間・起動した CLI を出す", async () => {
+    const res = await server.call("runs", { limit: 5 });
+    const text = textOf(res.result);
+    assert.match(text, /gpt-6-astra/, "モデルが出ていない");
+    assert.match(text, /gpt-6-astra\/\w+ \(codex\)/, "effort と backend が出ていない");
+    assert.match(text, /state=\S+\s+\d+[sm]/, "所要時間が出ていない");
+    // 記録の場所を書いておく（events.jsonl を直接読みたくなったときの入口）
+    assert.match(text, /記録の実体:/);
+  });
+
+  it("失敗した run には理由を添える", async () => {
+    const failing = startServer(
+      ws.env({ CODEX_FAKE_TURN_FAILED: "Selected model is at capacity." }),
+    );
+    try {
+      await failing.call("consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await failing.call("runs", { limit: 3 });
+      assert.match(textOf(res.result), /失敗: .*at capacity/);
+    } finally {
+      failing.close();
+    }
+  });
+
   it("存在しない run_id は見つからないと返す", async () => {
     const res = await server.call("status", { run_id: "20200101-000000-000-aaaa" });
     assert.equal(res.result.isError, true);

@@ -60,10 +60,10 @@ MCP サーバのコードを更新した場合、**動いているサーバプ�
 ## テスト
 
 ```bash
-cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/protocol.test.mjs test/runs.test.mjs
+cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 ```
 
-実 Codex は呼ばず、ダミーに差し替えて 132 件を検証する。
+実 Codex は呼ばず、ダミーに差し替えて 134 件を検証する。
 
 **Windows では走らない**（ダミーが shebang 付きの `.sh` で、Windows は実行できない）。
 WSL / Linux / macOS で実行すること。
