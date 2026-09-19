@@ -129,7 +129,11 @@ export function validatePatch(toolName, base, patch, config = readConfig()) {
   const effort = merged.effort === undefined ? base.baseEffort : merged.effort || undefined;
   if (!effort) return null;
 
-  const { adapter } = resolveAdapter(model);
+  // 検査には**接頭辞を落とした名前**を使う。resolveSettings が使うのはこちらなので、
+  // ここで "codex:gpt-5.5" のまま渡すと検査と実行で別のモデル名を見ることになる。
+  // キャッシュの slug に接頭辞は付かないため、接頭辞付きは必ず「キャッシュに無い」
+  // 側へ落ちて検査が素通りし、**保存では受理した effort を run が黙って捨てる**。
+  const { adapter, model: resolved } = resolveAdapter(model);
   if (!adapter.efforts.includes(effort)) {
     return (
       `${toolName}: effort=${effort} は ${adapter.id} では使えません` +
@@ -137,10 +141,10 @@ export function validatePatch(toolName, base, patch, config = readConfig()) {
     );
   }
   const known = adapter.knownModels();
-  if (!adapter.supportsEffort(model, effort, known)) {
+  if (!adapter.supportsEffort(resolved, effort, known)) {
     return (
-      `${toolName}: ${model} は effort=${effort} に対応していません` +
-      `（対応値: ${adapter.effortsFor(model, known).join(", ")}）`
+      `${toolName}: ${resolved} は effort=${effort} に対応していません` +
+      `（対応値: ${adapter.effortsFor(resolved, known).join(", ")}）`
     );
   }
   return null;

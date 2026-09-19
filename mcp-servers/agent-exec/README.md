@@ -512,7 +512,7 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
-151 件。
+159 件。
 
 **Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
 実行できない（`spawn EFTYPE`）。spawn を伴わない検証は通るが、それ以外は全滅する。
@@ -534,7 +534,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 7.0.0
+現在: 7.0.1
 ```
 
 **いまどの設定で動くかは `config` tool で分かる**（引数なしで呼ぶ）。コード既定か config
@@ -563,6 +563,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 | 6.2.0 | 外部レビューで挙がった 6 件を修正（下記）。repo 予約の競合、打ち切り中の SIGKILL 取り消し、`result` に拒否・失敗が出ない、セッション索引の `backend` 欠落、接続先の環境変数の巻き添え削除、ダミーの実行権限 |
 | 6.3.0 | claude の許可リストをコード既定（`DEFAULT_ALLOWED_TOOLS`）へ移す。登録が引数ゼロで済むようになり、再登録で設定が黙って消えなくなった。あわせて `--print-config` を追加 |
 | 7.0.0 | **モデル/effort の設定を `config` tool に集約**。環境変数 4 つ（`AGENT_EXEC_*_MODEL` / `_EFFORT`）と `--print-config` を廃止。設定は `config.json` に保存し、run ごとに解決するのでサーバ再起動が要らない。MCP しか使えない呼び出し側からも設定を扱える（[経緯](#どこで変えるか)） |
+| 7.0.1 | 外部レビューの 3 件を修正。(1) `config` の検査が `codex:` 接頭辞付きのモデル名をそのまま照合していたため、**受理した effort を run が黙って捨てて**いた（検査も解決後の名前を使う）。(2) `result` が生死不明の run を停止済みと同じ扱いにし、`isError` で「報告が記録されていません」と返していた（[生死判定は 3 値](#設計上の注意)が `status` でしか守られていなかった）。(3) プロセスの身元照会が「引けなかった」と「別プロセスだった」を同じ値に潰していたため、**照会の失敗がそのまま全 run の停止済み判定**になりえた（`markerVerdict` で 3 値にした） |
 
 ## 環境変数
 
@@ -627,11 +628,16 @@ claude mcp add agent -s user -- node <clone>/mcp-servers/agent-exec/server.mjs
   無ければ events）を見る。証跡があればそれが最も確かなので「完了」とする。無ければ
   身元確認つきの生存判定へ進む。逆順にすると、PID 再利用で**終わった run が永久に
   実行中に見え**、呼び出し側が無限にポーリングする。
-- **生死判定は 3 値**: `alive` / `dead` / **`unknown`**。マーカーを argv に確認できない
-  まま起動した run は `unknown` を返す。ここで `dead` に倒すと、実際には走っている run に
-  「報告が記録されていません」と**断言**してしまい、呼び出し側が失敗と判断して高価な
-  （apply なら破壊的な）再実行に走る。prune は `unknown` を残し、孤児回収は触らず、
-  `status` / `result` は「まだ動いているかもしれません」と返す。
+- **生死判定は 3 値**: `alive` / `dead` / **`unknown`**。ここで `dead` に倒すと、実際には
+  走っている run に「報告が記録されていません」と**断言**してしまい、呼び出し側が失敗と
+  判断して高価な（apply なら破壊的な）再実行に走る。prune は `unknown` を残し、孤児回収は
+  触らず、`status` / `result` は「まだ動いているかもしれません」と返す。
+  `unknown` になる経路は 2 つある: (a) マーカーを argv に確認できないまま起動した
+  （`reclaimable: false`）、(b) 起動時は確認できたが、**今の照会に失敗した**。
+  (b) のために、プロセスの身元照会も `match` / `mismatch` / **`unknown`** の 3 値で返す
+  （`markerVerdict`）。「コマンドラインを引けなかった」を「別プロセスだ」と同じ値に潰すと、
+  Windows で PowerShell の照会が一度こけただけで**全 run が一斉に停止済み判定**になる。
+  殺す判断としては「迷ったら止めない」で正しいが、生死判定では安全側が逆になる。
 - **argv マーカーはアダプタの義務**: 孤児回収の身元確認は「そのプロセスの argv に
   run_id が含まれる」ことに依存している。codex では `-o <runs>/<run_id>/last-message.txt`
   が偶然それを保証していた。アダプタに `marker` を申告させ、**engine が起動前に argv へ

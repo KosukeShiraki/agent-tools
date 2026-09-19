@@ -54,7 +54,7 @@ import {
 } from "./lib/runs.mjs";
 
 const SERVER_NAME = "agent-exec";
-const SERVER_VERSION = "7.0.0";
+const SERVER_VERSION = "7.0.1";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 // 反射してよいのはサポートしている版だけ。未知の版には自分の版を返す。
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -1056,7 +1056,11 @@ function reconstruct(runId, meta, events = readEvents(runId)) {
   // meta が running のままでも子プロセスが生きているとは限らない（その逆もある）。
   // events に終端があるなら、それが最も確かな完了の証拠なので優先する
   // （pid が別プロセスに再利用されていると、生死判定だけでは永久に「実行中」になる）。
-  const liveness = meta.state === "running" ? runLiveness(meta) : "dead";
+  // 終端を見ているなら生死判定は問わない（証跡のほうが確かなので "dead" に倒す）。
+  // 3 値のまま返すのは、呼び出し側が "dead" と "unknown" を区別できるようにするため。
+  // 潰すと result が「報告が記録されていません」と断言してしまう。
+  const liveness =
+    meta.state === "running" && !completed ? runLiveness(meta) : "dead";
   const alive = liveness === "alive";
   const state =
     meta.state === "running"
@@ -1075,7 +1079,8 @@ function reconstruct(runId, meta, events = readEvents(runId)) {
     : Date.now();
   return {
     state,
-    alive: alive && !completed,
+    alive,
+    liveness,
     elapsed_ms: finishedAt - Date.parse(meta.started_at),
     thread_id:
       meta.session_id ??
@@ -1252,6 +1257,18 @@ async function handleResult(params) {
         `${header}\n\n⏳ codex（pid=${current.pid}）はまだ動いています。報告はこれから書かれます。\n` +
           `しばらく後に result(run_id="${runId}") を再実行してください。\n` +
           `進捗: ${formatItemCounts(live.item_counts)}\n`,
+      );
+    }
+    // 生死を判断できない run。ここで「報告が記録されていません」を isError で返すと、
+    // 上とまったく同じ事故（失敗と誤読しての再実行）が起きる。status は既に
+    // 「まだ動いているかもしれません」と返しているので、result もそちらへ揃える。
+    if (live.liveness === "unknown") {
+      return textResult(
+        `${header}\n\n❓ この run が動いているかどうか判断できません` +
+          `（pid=${current.pid ?? "不明"} の身元を確認できませんでした）。\n` +
+          "報告はまだ記録されていません。動いていれば、これから書かれます。\n" +
+          `しばらく後に result(run_id="${runId}") を再実行してください。\n` +
+          `進捗: ${formatItemCounts(live.item_counts)}\n${diffText}`,
       );
     }
     return errorResult(

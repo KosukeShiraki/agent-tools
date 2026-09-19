@@ -12,7 +12,7 @@ import {
   currentBootId,
   isAlive,
   killTree,
-  processHasMarker,
+  processMarkerMatch,
   processStartTime,
   spawnExtras,
 } from "./platform.mjs";
@@ -59,10 +59,13 @@ export { currentBootId, isAlive, processStartTime } from "./platform.mjs";
 // (1) 起動時の boot_id が現在と一致する (2) pid が生きている (3) そのプロセスの
 // コマンドラインにマーカー（run_id）が入っている、の 3 つを重ねる。
 //
-// 3 値なのが要点。マーカーを確認できない起動だった run に "dead" を返すと、実際には
-// 走っている run に対して「報告が記録されていません」と断言してしまう。呼び出し側が
-// 失敗と判断して、apply なら破壊的な再実行に走る。判定できないときは "unknown" を返し、
-// 呼び出し側にその旨を伝えさせる。
+// 3 値なのが要点。判定できない run に "dead" を返すと、実際には走っている run に対して
+// 「報告が記録されていません」と断言してしまう。呼び出し側が失敗と判断して、apply なら
+// 破壊的な再実行に走る。判定できないときは "unknown" を返し、呼び出し側に伝えさせる。
+//
+// "unknown" になる経路は 2 つある。(a) 起動時に argv でマーカーを確認できなかった
+// （meta.reclaimable === false）、(b) 起動時は確認できたが、**今の照会に失敗した**。
+// (b) は (a) と違って記録からは分からないので、platform 側で 3 値にして受け取る。
 //
 // @returns {"alive"|"dead"|"unknown"}
 export function runLiveness(meta) {
@@ -74,7 +77,12 @@ export function runLiveness(meta) {
   // この run のものだと言い切れない。
   if (meta.reclaimable === false) return "unknown";
   const marker = meta.argv_marker ?? meta.run_id;
-  return processHasMarker(meta.pid, marker) ? "alive" : "dead";
+  // "別プロセスだ" と**確認できたとき**だけ dead。OS への照会自体が失敗した場合
+  // （Windows の PowerShell がこけた、Linux の hidepid など）は unknown で、
+  // ここを dead に倒すと照会の不調がそのまま記録の削除・誤った失敗応答になる。
+  const verdict = processMarkerMatch(meta.pid, marker);
+  if (verdict === "match") return "alive";
+  return verdict === "mismatch" ? "dead" : "unknown";
 }
 
 // prune 用。"unknown" は消さない側（残す側）に倒す。
@@ -451,5 +459,7 @@ export function snapshot(record) {
     failure: record.progress.failure ?? null,
     spawn_failed: record.spawnFailed ?? null,
     alive: true,
+    // 自分が抱えている run なので身元は自明。reconstruct と形を揃える。
+    liveness: "alive",
   };
 }

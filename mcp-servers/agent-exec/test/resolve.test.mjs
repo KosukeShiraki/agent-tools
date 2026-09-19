@@ -4,11 +4,15 @@
 // （他のテストはダミー CLI が shebang 付き .sh なので WSL / Linux / macOS が要る）。
 // 運用環境が Windows なので、ここに寄せられる検証は寄せる価値がある。
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import claudeBackend from "../lib/backends/claude.mjs";
 import codexBackend from "../lib/backends/codex.mjs";
 import { adapterById, resolveAdapter } from "../lib/backends/index.mjs";
+import { markerVerdict } from "../lib/platform.mjs";
 import { resolveSettings, validatePatch } from "../lib/settings.mjs";
 
 describe("モデル名からアダプタを決める", () => {
@@ -424,5 +428,83 @@ describe("設定の解決", () => {
     const reason = validatePatch("consult", consult, { model: "opus", effort: "ultra" }, {});
     assert.match(reason, /ultra/);
     assert.match(reason, /low, medium, high, xhigh, max/, "対応値を添える");
+  });
+
+  // 保存前の検査と run の解決が、同じモデルに違う名前を使っていた。検査は
+  // "codex:gpt-5.5" のまま照合するのでキャッシュの slug に当たらず素通りし、
+  // run は接頭辞を落として照合するので effort を捨てる。つまり **config が
+  // 受理した設定を run が黙って無視する**。接頭辞の有無で結果が変わらないこと。
+  it("codex: 接頭辞を付けても、受理・拒否と実効 effort は変わらない", () => {
+    const home = mkdtempSync(join(tmpdir(), "agent-exec-prefix-"));
+    writeFileSync(
+      join(home, "models_cache.json"),
+      JSON.stringify({
+        models: [
+          {
+            slug: "gpt-5.5",
+            visibility: "list",
+            // ultra は無い。codex アダプタ自体は ultra を持つので、
+            // モデル固有の制限だけを見ていることになる。
+            supported_reasoning_levels: ["low", "medium", "high", "xhigh"].map((effort) => ({
+              effort,
+            })),
+          },
+        ],
+      }),
+    );
+    const before = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    try {
+      const base = { baseModel: "gpt-5.5", baseEffort: "high" };
+      for (const model of ["gpt-5.5", "codex:gpt-5.5"]) {
+        const reason = validatePatch("consult", base, { model, effort: "ultra" }, {});
+        assert.ok(reason, `${model}: 対応しない effort が受理された`);
+        assert.match(reason, /gpt-5\.5 は effort=ultra/, `${model}: ${reason}`);
+        assert.doesNotMatch(reason, /codex:/, "報告は接頭辞を落とした名前で出す");
+        assert.match(reason, /low, medium, high, xhigh/, `${model}: 対応値を添える`);
+
+        const s = resolveSettings("consult", base, { consult: { model, effort: "ultra" } });
+        assert.equal(s.model, "gpt-5.5", `${model}: 解決後のモデル名`);
+        assert.equal(s.effort, undefined, `${model}: 実効 effort`);
+      }
+      // 対応している effort は、接頭辞の有無によらず通る
+      for (const model of ["gpt-5.5", "codex:gpt-5.5"]) {
+        assert.equal(validatePatch("consult", base, { model, effort: "xhigh" }, {}), null, model);
+      }
+    } finally {
+      if (before === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = before;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
+// OS への照会結果から身元を決める部分だけを切り出したもの。実プロセスが要らないので
+// ここで網羅できる。要点は「引けなかった」を「別物」に潰さないこと——潰すと、
+// PowerShell の照会が一度こけただけで全 run が「停止済み」判定になる。
+describe("プロセスの身元は 3 値", () => {
+  const MARKER = "20260101-000000-000-aaaa";
+
+  it("コマンドラインを引けたなら、一致・不一致を断定する", () => {
+    assert.equal(
+      markerVerdict(`codex exec -o /runs/${MARKER}/last-message.txt`, MARKER, true),
+      "match",
+    );
+    assert.equal(markerVerdict("sleep 30", MARKER, true), "mismatch");
+    // カーネルスレッドや zombie。引けてはいるので、確かに我々の子ではない
+    assert.equal(markerVerdict("", MARKER, true), "mismatch");
+  });
+
+  it("引けなかったが生きているなら unknown（dead に倒さない）", () => {
+    assert.equal(markerVerdict(undefined, MARKER, true), "unknown");
+  });
+
+  it("引けず、生きてもいないなら mismatch", () => {
+    assert.equal(markerVerdict(undefined, MARKER, false), "mismatch");
+  });
+
+  // 一致の判定は前方一致でも完全一致でもなく「含む」。argv のどこに現れてもよい。
+  it("マーカーは argv のどこにあってもよい", () => {
+    assert.equal(markerVerdict(`claude -p -n ${MARKER} --verbose`, MARKER, true), "match");
   });
 });

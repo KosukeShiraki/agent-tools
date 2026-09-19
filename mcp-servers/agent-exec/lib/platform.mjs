@@ -165,11 +165,28 @@ export function processInfo(pid) {
   return processTable().get(pid);
 }
 
-// その pid のコマンドラインに marker が含まれるか。判定できない場合は false
-// （「自分のものではない」と扱う）。殺す前の身元確認に使うので、迷ったら止めない。
-export function processHasMarker(pid, marker) {
-  const info = processInfo(pid);
-  return typeof info?.commandLine === "string" && info.commandLine.includes(marker);
+// 照会の結果から身元を 3 値で決める。**「引けなかった」を「別物」に潰さない**のが要点。
+//
+// 以前は真偽値で、コマンドラインを取れなかった場合も取れて一致しなかった場合も同じ
+// false を返していた。殺す判断としてはそれで安全側（迷ったら止めない）だが、呼び出し側は
+// 同じ値を**生死判定**にも使う。照会の失敗を「停止済み」に倒すと、走っている run の記録を
+// prune が消し、result が「報告が記録されていません」と断言する。安全側が逆になる。
+//
+// commandLine が空文字なのは「引けた」側に入れる。カーネルスレッドや zombie が該当し、
+// それらは確かに我々の子ではないので mismatch でよい。
+//
+// @returns {"match"|"mismatch"|"unknown"}
+export function markerVerdict(commandLine, marker, alive) {
+  if (typeof commandLine === "string")
+    return commandLine.includes(marker) ? "match" : "mismatch";
+  // 引けなかった。生きているなら分からない（Linux の hidepid、Windows で
+  // PowerShell の照会がこけた場合など）。生きていないならもう居ない。
+  return alive ? "unknown" : "mismatch";
+}
+
+// その pid が marker を持つプロセスか。@returns {"match"|"mismatch"|"unknown"}
+export function processMarkerMatch(pid, marker) {
+  return markerVerdict(processInfo(pid)?.commandLine, marker, isAlive(pid));
 }
 
 export function processStartTime(pid) {

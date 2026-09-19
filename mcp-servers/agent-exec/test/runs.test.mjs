@@ -595,7 +595,7 @@ describe("PID 再利用への耐性", () => {
     return child.pid;
   }
 
-  function writeStaleRun(runId, { pid, events }) {
+  function writeStaleRun(runId, { pid, events, ...extra }) {
     const dir = join(ws.runsDir, runId);
     execFileSync("mkdir", ["-p", dir]);
     writeFileSync(
@@ -610,6 +610,7 @@ describe("PID 再利用への耐性", () => {
         pid,
         server_pid: 999_999, // 存在しないサーバ
         boot_id: readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim(),
+        ...extra,
       }),
     );
     writeFileSync(join(dir, "events.jsonl"), events ?? "");
@@ -680,6 +681,82 @@ describe("PID 再利用への耐性", () => {
 
       // events から session_id も復元できる（meta に無くても）
       assert.match(textOf(status.result), /session_id=01a09c85-/);
+    } finally {
+      server.close();
+    }
+  });
+
+  // 生死判定は 3 値だが、result だけが unknown を dead と同じ扱いにしていた。
+  // 本文がまだ無い unknown の run に「報告が記録されていません」を isError で
+  // 返すと、呼び出し側が失敗と判断して（apply なら破壊的な）再実行に走る。
+  // status が「まだ動いているかもしれません」と返す run は、result も断言しない。
+  it("身元を確認できない run を、result が停止済みと断言しない", async () => {
+    const runId = "20260101-000000-000-dddd";
+    // 起動時に argv でマーカーを確認できなかった run（reclaimable: false）。
+    // pid は生きているが、それがこの run のものだとは言い切れない。
+    const pid = spawnDecoy(30);
+    writeStaleRun(runId, { pid, reclaimable: false });
+
+    const server = startServer(ws.env());
+    try {
+      const status = await server.call("status", { run_id: runId });
+      assert.match(
+        textOf(status.result),
+        /unknown（まだ動いているかもしれません）/,
+        textOf(status.result),
+      );
+
+      const result = await server.call("result", { run_id: runId });
+      const text = textOf(result.result);
+      assert.notEqual(result.result.isError, true, `停止済みとして失敗を返した: ${text}`);
+      assert.ok(!text.includes("報告が記録されていません"), text);
+      assert.match(text, /判断できません/, text);
+    } finally {
+      server.close();
+    }
+  });
+
+  // 逆側。終端の証跡があって本文が無いなら、それは「報告を書かずに終わった」
+  // なので、unknown へ倒さず今までどおり失敗として返す。
+  it("終端の証跡がある run は、本文が無ければ失敗として返す", async () => {
+    const runId = "20260101-000000-000-eeee";
+    const pid = spawnDecoy(30);
+    writeStaleRun(runId, {
+      pid,
+      reclaimable: false,
+      events: '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    });
+
+    const server = startServer(ws.env());
+    try {
+      const result = await server.call("result", { run_id: runId });
+      const text = textOf(result.result);
+      assert.equal(result.result.isError, true, text);
+      assert.match(text, /報告が記録されていません/, text);
+    } finally {
+      server.close();
+    }
+  });
+
+  // 3 値判定の prune 側。unknown を dead と同じ扱いにすると、走っているかもしれない
+  // run の記録を保持上限で消してしまう。消えると報告もセッション索引も失われ、
+  // しかも記録の書き込み失敗はほぼ握りつぶされるので、気づく手段が無い。
+  it("prune は生死不明の run を消さない", async () => {
+    const unknownId = "20260101-000000-000-ffff";
+    const dir = writeStaleRun(unknownId, { pid: spawnDecoy(30), reclaimable: false });
+    // 保持枠を埋めるための、確実に prune 対象になる新しい run
+    writeStaleRun("20260102-000000-000-gggg", {
+      pid: 999_998,
+      state: "completed",
+      finished_at: new Date(Date.now() - 3_600_000).toISOString(),
+    });
+
+    const server = startServer(
+      ws.env({ AGENT_EXEC_MAX_RUNS: "1", AGENT_EXEC_PRUNE_GRACE_MS: "1" }),
+    );
+    try {
+      await server.request("ping", {}); // 起動時の prune が済むまで待つ
+      assert.ok(existsSync(join(dir, "meta.json")), "生死不明の run が prune で消された");
     } finally {
       server.close();
     }
