@@ -193,6 +193,19 @@ export function processStartTime(pid) {
   return processInfo(pid)?.startTime ?? null;
 }
 
+// **自分の**起動時刻。`currentBootId()` と同じ理由でキャッシュする——このプロセスが
+// 生きている間は変わらないのに、run を起こすたび・設定のロックを取るたびに meta へ
+// 書くので、引き直していると Windows では **1 回ごとに PowerShell が起きる**
+// （1 回 350ms、実測）。他の pid の起動時刻はキャッシュしてはいけない（生死と
+// PID 再利用の判定に使うため）ので、自分用だけを分けてある。
+// null も「引けなかった」という結果として覚える。
+let ownStartTime;
+
+export function currentProcessStartTime() {
+  if (ownStartTime === undefined) ownStartTime = processStartTime(process.pid);
+  return ownStartTime;
+}
+
 // ---------------------------------------------------------------- 停止
 
 // 子プロセス「ツリー」を止める。codex は内部でシェル等を起こすので、

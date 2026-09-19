@@ -10,6 +10,7 @@ import { readEnvInt } from "./env.mjs";
 import {
   canIdentifyProcesses,
   currentBootId,
+  currentProcessStartTime,
   isAlive,
   killTree,
   processMarkerMatch,
@@ -238,7 +239,7 @@ export function launch({ runId, adapter, argv, marker, prompt, cwd, env, onFinis
   updateMeta(runId, {
     pid: child.pid ?? null,
     server_pid: process.pid,
-    server_start: processStartTime(process.pid),
+    server_start: currentProcessStartTime(),
     boot_id: currentBootId(),
     backend: adapter.id,
     argv_marker: markerOk ? marker : null,

@@ -27,7 +27,7 @@ import {
 import { dirname, join } from "node:path";
 
 import { resolveAdapter } from "./backends/index.mjs";
-import { isAlive, processStartTime } from "./platform.mjs";
+import { currentProcessStartTime, isAlive, processStartTime } from "./platform.mjs";
 import { RUNS_ROOT } from "./runs.mjs";
 
 export const CONFIG_PATH = join(dirname(RUNS_ROOT), "config.json");
@@ -137,7 +137,7 @@ function withConfigLock(fn) {
   try {
     writeFileSync(
       join(LOCK_PATH, "owner.json"),
-      JSON.stringify({ pid: process.pid, start: processStartTime(process.pid) }),
+      JSON.stringify({ pid: process.pid, start: currentProcessStartTime() }),
     );
     return fn();
   } finally {

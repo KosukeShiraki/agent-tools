@@ -12,7 +12,7 @@ import { describe, it } from "node:test";
 import claudeBackend from "../lib/backends/claude.mjs";
 import codexBackend from "../lib/backends/codex.mjs";
 import { adapterById, resolveAdapter } from "../lib/backends/index.mjs";
-import { markerVerdict } from "../lib/platform.mjs";
+import { currentProcessStartTime, markerVerdict, processStartTime } from "../lib/platform.mjs";
 import { resolveSettings, validatePatch } from "../lib/settings.mjs";
 
 describe("モデル名からアダプタを決める", () => {
@@ -507,4 +507,31 @@ describe("プロセスの身元は 3 値", () => {
   it("マーカーは argv のどこにあってもよい", () => {
     assert.equal(markerVerdict(`claude -p -n ${MARKER} --verbose`, MARKER, true), "match");
   });
+});
+
+// 自分の起動時刻はこのプロセスが生きている間は変わらないのに、run を起こすたび・
+// 設定のロックを取るたびに meta へ書く。引き直していると Windows では毎回
+// PowerShell が起きる（この端末で実測 440ms）。currentBootId と同じ扱いにする。
+describe("自分の起動時刻はキャッシュする", () => {
+  it("値は processStartTime(process.pid) と一致し、何度呼んでも変わらない", () => {
+    assert.equal(currentProcessStartTime(), processStartTime(process.pid));
+    assert.equal(currentProcessStartTime(), currentProcessStartTime());
+  });
+
+  // Linux は /proc を読むだけで速く、キャッシュの有無で差が出ないため判定にならない。
+  // 運用環境である Windows でだけ、外部コマンドが消えたことを所要時間で確かめる。
+  it(
+    "2 回目以降は外部コマンドを起こさない（Windows のみ）",
+    { skip: process.platform === "win32" ? false : "Windows でのみ差が出る" },
+    async () => {
+      currentProcessStartTime(); // 1 回目で埋める
+      // processTable の TTL(1s) を跨ぐ。跨がないとテーブルのキャッシュが効いてしまい、
+      // 自分の起動時刻をキャッシュしているかどうかの判定にならない。
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      const started = process.hrtime.bigint();
+      currentProcessStartTime();
+      const ms = Number(process.hrtime.bigint() - started) / 1e6;
+      assert.ok(ms < 50, `2 回目に ${ms.toFixed(1)}ms かかった（毎回引き直している）`);
+    },
+  );
 });
