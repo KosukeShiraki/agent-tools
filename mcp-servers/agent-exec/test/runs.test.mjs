@@ -1042,3 +1042,117 @@ describe("codex 側のエラー", () => {
     }
   });
 });
+
+// 「親 CLI が終了した」と「run のプロセス群が止まった」は別物。前者で run を手放すと
+// (1) repo 予約が空いて次の apply が同じ作業ツリーに重なり (2) サーバ終了時の停止対象
+// から漏れる。(2) は meta が既に killed なので次回起動の孤児回収にも拾われない。
+describe("打ち切りの完了まで手放さない", () => {
+  let ws;
+  const strays = [];
+
+  // SIGTERM を無視する孫を作らせ、その pid を受け取る
+  function stubbornEnv(pidFile) {
+    return ws.env({
+      CODEX_FAKE_SLEEP: "30",
+      CODEX_FAKE_STUBBORN: "30",
+      CODEX_FAKE_PIDFILE: pidFile,
+    });
+  }
+
+  function alive(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      return err?.code === "EPERM";
+    }
+  }
+
+  async function waitGone(pid, ms) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (!alive(pid)) return true;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return !alive(pid);
+  }
+
+  // 予約が返るのは SIGKILL の後始末まで終わってから。空くまで試す。
+  async function applyUntilAccepted(server, ms) {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      const res = await server.call(
+        "apply",
+        { prompt: "その次", cwd: ws.gitDir, timeout_ms: 1000 },
+        {},
+        40_000,
+      );
+      if (res.result.isError !== true || Date.now() >= deadline) return res.result;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  // 打ち切りを起こし、親が終わって孫だけが残っている状態にする
+  async function killedWithStubbornChild(server, pidFile) {
+    const res = await server.call(
+      "apply",
+      { prompt: "長い作業", cwd: ws.gitDir, timeout_ms: 1000, kill_on_timeout: true },
+      {},
+      40_000,
+    );
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isInteger(pid) && pid > 0, `孫の pid を取れない: ${pid}`);
+    strays.push(pid);
+    assert.ok(alive(pid), "孫がもう居ない（このテストの前提が崩れている）");
+    return { text: textOf(res.result), pid };
+  }
+
+  before(() => {
+    ws = makeWorkspace("killtracking");
+  });
+  after(() => {
+    for (const pid of strays) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* もう居ない */
+      }
+    }
+    rmSync(ws.root, { recursive: true, force: true });
+  });
+
+  it("孫が止まるまで repo 予約を返さない", async () => {
+    const pidFile = join(ws.root, "stubborn-repo.pid");
+    const server = startServer(stubbornEnv(pidFile));
+    try {
+      const { pid } = await killedWithStubbornChild(server, pidFile);
+
+      // 親は終わったが孫は生きている。この時点で予約を返してはいけない
+      const overlap = await server.call("apply", { prompt: "次の作業", cwd: ws.gitDir });
+      assert.equal(overlap.result.isError, true, textOf(overlap.result));
+      assert.match(textOf(overlap.result), /同じリポジトリで apply が実行中/);
+
+      // SIGKILL（3秒）+ 後始末（2秒）を過ぎれば孫は止まり、予約も返る。
+      // 孫の停止と予約の解放には 2 秒の差があるので、空くまで試す。
+      assert.ok(await waitGone(pid, 15_000), "SIGKILL 後も孫が残っている");
+      const next = await applyUntilAccepted(server, 15_000);
+      assert.notEqual(next.isError, true, textOf(next));
+    } finally {
+      server.close();
+    }
+  });
+
+  it("親終了後・SIGKILL 前にサーバが終了しても孫を残さない", async () => {
+    const pidFile = join(ws.root, "stubborn-shutdown.pid");
+    const server = startServer(stubbornEnv(pidFile));
+    let pid;
+    try {
+      ({ pid } = await killedWithStubbornChild(server, pidFile));
+    } finally {
+      // 確定直後・SIGKILL の予約が発火する前にサーバを落とす。
+      // 予約はタイマーなので、ここで process.exit されると一緒に消える。
+      server.close();
+    }
+    assert.ok(await waitGone(pid, 10_000), "サーバ終了後も孫が残った（課金が続く）");
+  });
+});

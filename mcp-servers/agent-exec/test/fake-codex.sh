@@ -9,6 +9,8 @@
 #   CODEX_FAKE_WEIRD      壊れた行・未知 item・巨大行を出す
 #   CODEX_FAKE_TOUCH       cwd 配下のこのパスへ追記する（git 差分の確認用）
 #   CODEX_FAKE_ORPHAN      stdout を握ったまま別プロセスグループへ逃げる孫を作る（秒数）
+#   CODEX_FAKE_STUBBORN    SIGTERM を無視し、同じプロセスグループに残る孫を作る（秒数）
+#   CODEX_FAKE_PIDFILE     CODEX_FAKE_STUBBORN の孫の pid を書き出す先
 #   CODEX_FAKE_THREAD_ID   thread.started で返す id
 #   CODEX_FAKE_STDERR      stderr へ出す文字列
 set -u
@@ -30,6 +32,14 @@ done
 # 親の stdout を継いだまま別セッションへ逃げる孫。これが居ると close は発火しない。
 if [ -n "${CODEX_FAKE_ORPHAN:-}" ]; then
   setsid bash -c "sleep ${CODEX_FAKE_ORPHAN}" &
+fi
+
+# SIGTERM を無視するが、**プロセスグループからは逃げない**孫。親だけが SIGTERM で
+# 落ち、孫は SIGKILL まで生き延びる状況（実 CLI で起きる形）を作る。親の stdout を
+# 継ぐので close は発火せず、exit + drain 猶予で確定する経路を通る。
+if [ -n "${CODEX_FAKE_STUBBORN:-}" ]; then
+  bash -c 'trap "" TERM; printf "%s\n" "$$" > "${CODEX_FAKE_PIDFILE:-/dev/null}"; sleep "$1"' \
+    _ "${CODEX_FAKE_STUBBORN}" &
 fi
 
 # イベントは先に出す。打ち切られても「ここまでの報告」が残ることを再現する。

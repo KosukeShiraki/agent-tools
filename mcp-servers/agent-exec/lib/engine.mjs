@@ -45,12 +45,23 @@ const HARD_LIMIT_MS = readEnvInt(
 /** run_id -> 実行中レコード */
 const activeRuns = new Map();
 
+// run_id -> 確定済みだが、まだプロセス群の停止を待っているレコード。
+//
+// **「親 CLI が終了した」と「run のプロセス群が止まった」は別物である。** 親が SIGTERM で
+// 素直に落ちても、SIGTERM を無視する孫が同じプロセスグループに残ることがある。確定と
+// 同時に手放していたので、(1) repo 予約が空いて次の apply が同じ作業ツリーに重なり、
+// (2) shutdownAll が activeRuns しか見ないためサーバ終了時の停止対象から漏れていた。
+// (2) は meta が既に killed なので次回起動の孤児回収にも拾われず、孫が残り続ける。
+const pendingKills = new Map();
+
+// 確定済みの run は返さない（status / result は記録から復元する側へ倒す）。
 export function getActive(runId) {
   return activeRuns.get(runId);
 }
 
+// 実行枠を握っている run。停止待ちも枠を握ったままなので、ここに含める。
 export function activeRunIds() {
-  return [...activeRuns.keys()];
+  return [...activeRuns.keys(), ...pendingKills.keys()];
 }
 
 export { currentBootId, isAlive, processStartTime } from "./platform.mjs";
@@ -169,6 +180,22 @@ function applyDelta(record, delta, runId) {
 
 // ---------------------------------------------------------------- 起動と監視
 
+// run を手放す。ここで初めて repo 予約と実行枠が返る（onFinish が両方を解放する）。
+// 打ち切り中は呼ばない——親の終了で解放すると、孫がまだ触っている作業ツリーへ
+// 次の apply が入れてしまう。
+function releaseRun(record) {
+  if (record.released) return;
+  record.released = true;
+  pendingKills.delete(record.runId);
+  if (record.onFinish) {
+    try {
+      record.onFinish(record);
+    } catch {
+      /* 呼び出し側の都合で失敗しても run の確定は済んでいる */
+    }
+  }
+}
+
 export function launch({ runId, adapter, argv, marker, prompt, cwd, env, onFinish }) {
   // アダプタが申告したマーカーが本当に argv に現れるか、起動前に確かめる。
   // ここを信用のままにすると、孤児回収と生死判定が「黙って無効化される」形で壊れる。
@@ -249,17 +276,17 @@ export function launch({ runId, adapter, argv, marker, prompt, cwd, env, onFinis
       spawn_failed: record.spawnFailed ?? null,
       ...record.progress.extra,
     });
+    // 応答は今すぐ返してよい。親 CLI の結末はもう分かっているので、呼び出し側を
+    // 孫の停止まで待たせる理由が無い。
     for (const waiter of record.waiters) waiter(record.state);
     record.waiters.clear();
-    if (onFinish) {
-      try {
-        onFinish(record);
-      } catch {
-        /* 呼び出し側の都合で失敗しても run の確定は済んでいる */
-      }
-    }
+    // ただし**手放すのは別**。打ち切り中なら、SIGKILL を撃ち終えるまで repo 予約と
+    // 実行枠を握り、サーバ終了時の停止対象にも残す。
+    if (record.killing) pendingKills.set(runId, record);
+    else releaseRun(record);
   };
   record.finalize = finalize;
+  record.onFinish = onFinish;
 
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => {
@@ -377,9 +404,13 @@ export function killRun(runId, reason) {
     // PID 再利用への誤爆が心配な処理だが、SIGTERM を送ってから 3 秒以内であり、
     // その間に PID が一周して別プロセスに割り当たることは事実上ない。
     killTree(record.child.pid, "SIGKILL");
-    // 孫が stdout を握ったままでも必ず確定させる（finalize 済みなら何もしない）
+    // 孫が stdout を握ったままでも必ず確定させる（finalize 済みなら何もしない）。
+    // **手放すのはここ。** SIGKILL を撃ち終えて初めて repo 予約と実行枠を返す。
     record.settleTimer = setTimeout(
-      () => record.finalize({ code: null, signal: "SIGKILL" }),
+      () => {
+        record.finalize({ code: null, signal: "SIGKILL" });
+        releaseRun(record);
+      },
       KILL_SETTLE_MS,
     );
     record.settleTimer.unref();
@@ -440,7 +471,15 @@ export function shutdownAll() {
       /* 書けなければ諦める */
     }
   }
+  // 打ち切りの完了を待っている run も落とす。ここを見ないと、親 CLI が終わった直後に
+  // サーバが終了した場合に **SIGKILL の予約ごと消えて孫だけが残る**。meta は既に
+  // killed なので次回起動の孤児回収も拾わない（回収は state=running だけを見る）。
+  // 状態はもう確定しているので、書き換えずプロセス群だけ確実に止める。
+  for (const record of pendingKills.values()) {
+    killTree(record.child.pid, "SIGKILL");
+  }
   activeRuns.clear();
+  pendingKills.clear();
 }
 
 export function snapshot(record) {
