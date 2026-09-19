@@ -5,7 +5,7 @@ Claude Code / Codex CLI で使う道具の置き場。スキルと MCP サーバ
 | 種類 | 名前 | 内容 |
 |---|---|---|
 | スキル | `consulting-slides` | 経営層向けの戦略コンサルティング資料を HTML スライド（16:9）で作成する。24種の図解パターン、ヘッドレス Chrome による全ページ画像検証つき。求められたときだけ PPTX にも変換できる |
-| MCP サーバ | `mcp-servers/agent-exec` | Codex CLI を MCP の tool として Claude Code へ公開する。相談と実装を委譲でき、長時間の run は切り離して後から結果を取れる |
+| MCP サーバ | `mcp-servers/agent-exec` | Codex CLI と Claude Code を MCP の tool として Claude Code へ公開する。モデル名で起動する CLI が決まる。相談と実装を委譲でき、長時間の run は切り離して後から結果を取れる |
 
 ## セットアップ（各端末で1回）
 
@@ -63,7 +63,7 @@ MCP サーバのコードを更新した場合、**動いているサーバプ�
 cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/protocol.test.mjs test/runs.test.mjs
 ```
 
-実 Codex は呼ばず、ダミーに差し替えて 85 件を検証する。
+実 Codex は呼ばず、ダミーに差し替えて 132 件を検証する。
 
 **Windows では走らない**（ダミーが shebang 付きの `.sh` で、Windows は実行できない）。
 WSL / Linux / macOS で実行すること。

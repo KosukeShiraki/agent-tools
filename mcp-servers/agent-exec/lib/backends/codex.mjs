@@ -129,9 +129,9 @@ export default {
     }
     if (event.type === "item.completed") {
       const itemType = typeof event.item?.type === "string" ? event.item.type : "unknown";
-      const delta = { itemType };
+      const delta = { itemTypes: [itemType] };
       if (itemType === "agent_message" && typeof event.item?.text === "string") {
-        delta.message = event.item.text;
+        delta.messages = [event.item.text];
       }
       return delta;
     }

@@ -93,14 +93,21 @@ function newProgress() {
     lastItemType: undefined,
     eventCount: 0,
     usage: undefined,
+    extra: {},
   };
 }
 
 // アダプタが返した delta を進捗へ反映し、必要なものだけ即時に永続化する。
 // 即時に書くのは sessionId / 終端 / failure の 3 つだけ。これらはサーバが落ちても
-// 引き継げる必要がある。
-function applyDelta(progress, delta, runId) {
+// 引き継げる必要がある。それ以外（usage など）は finalize でまとめて書く
+// （claude の rate_limit_event のように毎秒流れるものがあり、都度 meta を全書き換え
+// していると I/O が無駄になる）。
+//
+// itemTypes / messages が配列なのは、1 イベントに複数の事実が入る CLI があるため
+// （claude の assistant イベントは thinking と text と tool_use を同時に持つ）。
+function applyDelta(record, delta, runId) {
   if (!delta) return;
+  const progress = record.progress;
   if (typeof delta.sessionId === "string") {
     progress.sessionId = delta.sessionId;
     // 完了を待たずに残す。サーバが落ちても session_id を引き継げるようにするため。
@@ -112,15 +119,20 @@ function applyDelta(progress, delta, runId) {
       recordSession(delta.sessionId, { run_id: runId, cwd: meta.cwd, tool: meta.tool });
     }
   }
-  if (typeof delta.itemType === "string") {
-    progress.itemCounts[delta.itemType] = (progress.itemCounts[delta.itemType] ?? 0) + 1;
-    progress.lastItemType = delta.itemType;
+  for (const itemType of delta.itemTypes ?? []) {
+    progress.itemCounts[itemType] = (progress.itemCounts[itemType] ?? 0) + 1;
+    progress.lastItemType = itemType;
   }
-  if (typeof delta.message === "string") {
-    progress.messages.push(delta.message);
-    appendMessage(runId, delta.message);
+  for (const message of delta.messages ?? []) {
+    progress.messages.push(message);
+    appendMessage(runId, message);
+  }
+  // CLI 自身が最終メッセージをファイルへ書かない場合はここで書く（codex は -o が書く）。
+  if (typeof delta.finalMessage === "string") {
+    writeArtifact(runId, "last-message.txt", delta.finalMessage);
   }
   if (delta.usage) progress.usage = delta.usage;
+  if (delta.extra) Object.assign(progress.extra, delta.extra);
   if (delta.completed) {
     // 終端を見たことを記録に残す。一覧・状態・結果のどこからでも同じ判定ができる。
     // turn_completed は既存の記録が使っているキー。新旧の両方を書く。
@@ -129,6 +141,14 @@ function applyDelta(progress, delta, runId) {
   if (typeof delta.failure === "string") {
     progress.failure = delta.failure;
     updateMeta(runId, { failure: delta.failure });
+  }
+  // 続行させてはいけない状態（子が MCP を継承して再帰しかけている等）。
+  // 警告で済ませると課金が伸び続けるので、その場で打ち切る。
+  if (typeof delta.abort === "string") {
+    progress.failure = delta.abort;
+    updateMeta(runId, { failure: delta.abort });
+    process.stderr.write(`[${runId}] ${delta.abort} — 打ち切ります\n`);
+    killRun(runId, delta.abort);
   }
 }
 
@@ -209,6 +229,7 @@ export function launch({ runId, adapter, argv, marker, prompt, cwd, env, onFinis
       usage: record.progress.usage ?? null,
       note: record.spawnFailed ?? record.killReason ?? null,
       spawn_failed: record.spawnFailed ?? null,
+      ...record.progress.extra,
     });
     for (const waiter of record.waiters) waiter(record.state);
     record.waiters.clear();
@@ -242,7 +263,7 @@ export function launch({ runId, adapter, argv, marker, prompt, cwd, env, onFinis
         continue; // JSON でない行は生ログにだけ残す
       }
       record.progress.eventCount += 1;
-      applyDelta(record.progress, adapter.parseEvent(event), runId);
+      applyDelta(record, adapter.parseEvent(event), runId);
     }
     if (record.stdoutBuffer.length > MAX_STDOUT_BUFFER_CHARS) {
       process.stderr.write(

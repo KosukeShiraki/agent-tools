@@ -1,4 +1,5 @@
-// テスト共通のヘルパー。実 codex は呼ばず、fake-codex.sh を CODEX_BIN として使う。
+// テスト共通のヘルパー。実 CLI は呼ばず、fake-codex.sh / fake-claude.sh を
+// CODEX_BIN / CLAUDE_BIN として差し替える。
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,12 +9,14 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const SERVER = join(HERE, "..", "server.mjs");
 export const FAKE_CODEX = join(HERE, "fake-codex.sh");
+export const FAKE_CLAUDE = join(HERE, "fake-claude.sh");
 export const FAKE_THREAD_ID = "01a09c85-9969-7611-97f2-0d00bf50a7f9";
+export const FAKE_SESSION_ID = "2a09c9a8-ac59-4508-b9ea-8dddcd38aaf2";
 
 // サーバを1本起動し、id 対応で JSON-RPC をやり取りする薄いクライアント。
 export function startServer(env = {}) {
   const child = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, CODEX_BIN: FAKE_CODEX, ...env },
+    env: { ...process.env, CODEX_BIN: FAKE_CODEX, CLAUDE_BIN: FAKE_CLAUDE, ...env },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const pending = new Map();
@@ -163,6 +166,7 @@ export function makeWorkspace(prefix) {
     argvFile: join(root, "argv.txt"),
     stdinFile: join(root, "stdin.txt"),
     pwdFile: join(root, "pwd.txt"),
+    childEnvFile: join(root, "childenv.txt"),
     env(extra = {}) {
       return {
         CODEX_HOME: codexHome,
@@ -170,6 +174,10 @@ export function makeWorkspace(prefix) {
         CODEX_FAKE_ARGV_FILE: join(root, "argv.txt"),
         CODEX_FAKE_STDIN_FILE: join(root, "stdin.txt"),
         CODEX_FAKE_PWD_FILE: join(root, "pwd.txt"),
+        CLAUDE_FAKE_ARGV_FILE: join(root, "argv.txt"),
+        CLAUDE_FAKE_STDIN_FILE: join(root, "stdin.txt"),
+        CLAUDE_FAKE_PWD_FILE: join(root, "pwd.txt"),
+        CLAUDE_FAKE_ENV_FILE: join(root, "childenv.txt"),
         ...extra,
       };
     },

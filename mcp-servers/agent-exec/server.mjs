@@ -6,8 +6,8 @@
 // Node 標準モジュールのみで動く（依存ゼロ）。
 //
 // 5.0.0 で codex-exec から agent-exec へ改名し、CLI 固有の部分を lib/backends/ の
-// アダプタへ寄せた。現時点で動かせるのは codex だけで、モデル名から起動する CLI を
-// 決める仕組みは次の版で入れる。
+// アダプタへ寄せた。6.0.0 で claude -p を追加し、**モデル名から起動する CLI を決める**
+// ようにした（backend という引数は呼び出し側に見せない）。
 
 import { isAbsolute, join } from "node:path";
 import {
@@ -29,7 +29,7 @@ import {
 } from "./lib/engine.mjs";
 import { captureGitState, diffGitState, gitRoot } from "./lib/git.mjs";
 import { readEnv, readEnvInt } from "./lib/env.mjs";
-import codexBackend from "./lib/backends/codex.mjs";
+import { adapterById, resolveAdapter } from "./lib/backends/index.mjs";
 import {
   createRun,
   isValidRunId,
@@ -45,7 +45,7 @@ import {
 } from "./lib/runs.mjs";
 
 const SERVER_NAME = "agent-exec";
-const SERVER_VERSION = "5.0.0";
+const SERVER_VERSION = "6.0.0";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 // 反射してよいのはサポートしている版だけ。未知の版には自分の版を返す。
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -144,21 +144,15 @@ const TOOL_MODES = {
   },
 };
 
-// コミット 1 の時点ではアダプタは codex 固定。モデル名からの解決はコミット 2 で入れる。
-function adapterFor(_mode) {
-  return codexBackend;
+// 起動時に 1 度だけ解決し、結果を mode に焼く。実行のたびに判定しない。
+function adapterFor(mode) {
+  return mode.adapter;
 }
 
 // 終端を観測済みか。terminal_seen は 5.0.0 からのキーで、turn_completed は
 // それ以前の記録が持っている。移行中はどちらも読む。
 function terminalSeen(meta) {
   return meta?.terminal_seen === true || meta?.turn_completed === true;
-}
-
-// 記録から引く。backend を持たない古い run は codex で走ったものとみなす。
-// コミット 2 でアダプタが増えたら、ここを登録表の引き当てに変える。
-function adapterById(_id) {
-  return codexBackend;
 }
 
 // model / reasoning_effort は意図的に含めない。呼び出し側の LLM に選ばせると、
@@ -183,7 +177,18 @@ const APPLY_ARG_KEYS = [...RUN_ARG_KEYS, "scope"];
 // モデル slug は開いた集合（キャッシュが古いこともある）なので、警告だけ出して使う。
 function checkDefaults() {
   for (const [toolName, mode] of Object.entries(TOOL_MODES)) {
-    const adapter = adapterFor(mode);
+    // モデル名から起動する CLI を決める。ここで 1 度だけ解決して mode に焼く。
+    const resolved = resolveAdapter(mode.defaultModel);
+    mode.adapter = resolved.adapter;
+    mode.defaultModel = resolved.model;
+    if (!resolved.confident) {
+      process.stderr.write(
+        `warning: ${toolName} のモデル "${resolved.model}" はどの CLI にも紐づきません。` +
+          `${resolved.adapter.id} として起動します` +
+          `（意図が違う場合は "claude:${resolved.model}" のように接頭辞を付けてください）\n`,
+      );
+    }
+    const adapter = mode.adapter;
     const known = adapter.knownModels();
     if (mode.defaultEffort && !adapter.efforts.includes(mode.defaultEffort)) {
       process.stderr.write(
@@ -213,6 +218,14 @@ function checkDefaults() {
           "（キャッシュが古いだけの可能性があるため、そのまま使います）\n",
       );
     }
+    // どの tool がどの CLI・どのモデルで走るかを毎回 stderr に出す。設定を変えた端末で
+    // 「反映されているか」を確かめる唯一の手がかりになる。
+    const sandbox = adapter.sandbox(mode.capability);
+    process.stderr.write(
+      `${toolName}: model=${mode.defaultModel ?? "(CLI 既定)"} ` +
+        `effort=${mode.defaultEffort ?? "(CLI 既定)"} → ${adapter.bin()} ` +
+        `(${sandbox.label} / ${sandbox.enforcement})\n`,
+    );
   }
 }
 
@@ -455,13 +468,16 @@ function toArgs(params) {
 // run 本体は prune で消えるが、索引は残るので会話は継続できる。
 function findSessionOrigin(sessionId, cwd) {
   const indexed = lookupSession(sessionId);
-  if (indexed?.cwd) return indexed;
+  if (indexed?.cwd) {
+    // 索引には backend を持たせていないので、run 本体から補う（消えていれば undefined）。
+    return { ...indexed, backend: readMeta(indexed.run_id)?.backend };
+  }
   // 索引が無い古い記録との互換。同じ session_id の run が並ぶので cwd 一致を優先する。
   let fallback;
   for (const runId of listRunIds()) {
     const meta = readMeta(runId);
-    if (meta?.thread_id !== sessionId) continue;
-    const entry = { run_id: runId, cwd: meta.cwd, tool: meta.tool };
+    if (meta?.session_id !== sessionId && meta?.thread_id !== sessionId) continue;
+    const entry = { run_id: runId, cwd: meta.cwd, tool: meta.tool, backend: meta.backend };
     if (meta.cwd === cwd) return entry;
     fallback ??= entry;
   }
@@ -714,6 +730,15 @@ async function handleRun(toolName, params) {
           "作業ディレクトリが変わると文脈と実際の作業先がずれるため、同じ cwd を指定してください。",
       );
     }
+    // 別の CLI で作られたセッションは再開できない。env のモデルを codex 系から
+    // claude 系（またはその逆）へ変えた直後に必ず踏むので、理由を明示して止める。
+    const originBackend = origin.backend ?? "codex";
+    if (originBackend !== adapter.id) {
+      return errorResult(
+        `このセッションは別の CLI（${originBackend}）で作られています（今回は ${adapter.id}）。\n` +
+          "モデル設定が変わったため再開できません。文脈を prompt に書いて新しく始めてください。",
+      );
+    }
     // tool をまたぐ継続（調査 → 修正、修正 → レビュー）は自然なので拒否しない。
     // ただし sandbox が変わることは応答に明示する。
     if (origin.tool && origin.tool !== toolName) {
@@ -724,7 +749,11 @@ async function handleRun(toolName, params) {
   let effectivePrompt = scope === "strict" ? `${prompt}${SCOPE_NOTE}` : prompt;
   // 書き込みを伴う run だけ、テストの実行と申告を求める（consult は走らせられない）。
   if (mode.scopeNote) effectivePrompt = `${effectivePrompt}${TEST_NOTE}`;
-  if (!delegate) effectivePrompt = `${effectivePrompt}${SOLO_NOTE}`;
+  // 委譲を argv で禁止できる CLI（claude は Task を許可リストから外すだけで済む）では
+  // prompt で頼む必要がない。無意味な指示にトークンを払わない。
+  if (!delegate && adapter.needsSoloNote) {
+    effectivePrompt = `${effectivePrompt}${SOLO_NOTE}`;
+  }
   const startedAt = new Date();
   // 差分の比較は書き込みを伴う apply でのみ使う（consult では git を呼ばない）。
   const gitBefore = mode.scopeNote ? captureGitState(cwd) : undefined;
@@ -787,6 +816,7 @@ async function handleRun(toolName, params) {
     model,
     effort,
     resumeSessionId,
+    delegate,
     skipGitRepoCheck: mode.skipGitRepoCheck,
   });
 
@@ -872,11 +902,36 @@ async function handleRun(toolName, params) {
     );
   }
 
-  return finishedResult({ runId, header, cwd, mode, gitBefore, live });
+  return finishedResult({
+    runId,
+    header,
+    cwd,
+    mode,
+    gitBefore,
+    live,
+    caveat: sandbox.caveat,
+  });
 }
 
-function finishedResult({ runId, header, cwd, mode, gitBefore, live }) {
+// 承認が下りずに実行できなかった操作。claude の apply では「テストを走らせられなかった」
+// 理由がここに出る。捨てると、なぜテストの報告が無いのかが分からない。
+function formatDenials(meta) {
+  const denials = meta.permission_denials;
+  if (!Array.isArray(denials) || denials.length === 0) return "";
+  const lines = denials
+    .map((d) => "  - " + (d.tool_name ?? "?") + ": " + (d.command ?? "(詳細なし)"))
+    .join("\n");
+  return (
+    "\n⚠ 次の操作は許可されていないため実行されませんでした:\n" +
+    lines +
+    "\n  許可するには AGENT_EXEC_CLAUDE_ALLOWED_TOOLS に追加してください" +
+    '（例: "Bash(node --test*)"）。\n'
+  );
+}
+
+function finishedResult({ runId, header, cwd, mode, gitBefore, live, caveat }) {
   const meta = readMeta(runId) ?? {};
+  const notes = formatDenials(meta) + (caveat ? `\n注: ${caveat}\n` : "");
   const body = pickBody(runId, live.messages);
   const gitDiff =
     meta.git_diff ??
@@ -931,7 +986,7 @@ function finishedResult({ runId, header, cwd, mode, gitBefore, live }) {
     ? `\n（tokens: in=${live.usage.input_tokens ?? "?"} out=${live.usage.output_tokens ?? "?"}）`
     : "";
   return textResult(
-    `${header}${usage}\n\n${truncateMiddle(body.text, MAX_OUTPUT_CHARS)}\n${diffText}`,
+    `${header}${usage}\n\n${truncateMiddle(body.text, MAX_OUTPUT_CHARS)}\n${diffText}${notes}`,
   );
 }
 
@@ -952,14 +1007,13 @@ function reconstruct(runId, meta, events = readEvents(runId)) {
   // events から拾う。
   let messages = readMessages(runId);
   if (messages.length === 0) {
-    messages = deltas
-      .map((delta) => delta?.message)
-      .filter((text) => typeof text === "string");
+    messages = deltas.flatMap((delta) => delta?.messages ?? []);
   }
   const itemCounts = {};
   for (const delta of deltas) {
-    if (typeof delta?.itemType !== "string") continue;
-    itemCounts[delta.itemType] = (itemCounts[delta.itemType] ?? 0) + 1;
+    for (const itemType of delta?.itemTypes ?? []) {
+      itemCounts[itemType] = (itemCounts[itemType] ?? 0) + 1;
+    }
   }
   // meta が running のままでも子プロセスが生きているとは限らない（その逆もある）。
   // events に終端があるなら、それが最も確かな完了の証拠なので優先する

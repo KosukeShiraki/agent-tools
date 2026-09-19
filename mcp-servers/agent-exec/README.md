@@ -1,7 +1,30 @@
 # agent-exec MCP サーバ
 
 エージェント CLI を MCP の tool として Claude Code へ公開する stdio サーバ。
-現時点で動かせるのは Codex CLI (`codex exec`) だけ。
+Codex CLI (`codex exec`) と Claude Code (`claude -p`) を動かせる。
+
+## モデル名で起動する CLI が決まる
+
+**`backend` のような引数は無い。** 利用者が決めるのはモデルと effort だけで
+（[tool の引数ではなく環境変数](#モデルと-effort-は利用者だけが決める)）、モデルが
+決まれば行き先も決まる。
+
+```
+gpt-6-astra / gpt-5.6-luna / gpt-* / models_cache.json にあるもの → codex exec
+opus / sonnet / haiku / fable / claude-* / us.anthropic.*         → claude -p
+```
+
+前方一致なので `opus-4.5` / `sonnet[1m]` / `claude-opus-5[1m]` も拾う。**未知の名前は
+拒否せず** codex（従来の既定）へ倒し、起動時に警告を出す。キャッシュが古い／新しい
+モデルが出た、で正当な設定を弾くと毎 run 失敗するため。命名規則が破られたときは
+`claude:<名前>` / `codex:<名前>` と接頭辞で明示できる。
+
+どの tool がどこへ行くかは、起動時に必ず stderr へ出る:
+
+```
+consult: model=haiku effort=low → claude (read-only(tool 制限) / tool-allowlist)
+apply:   model=gpt-5.6-luna effort=max → codex (workspace-write / os-sandbox)
+```
 
 ## 構成
 
@@ -9,17 +32,21 @@ CLI 固有の部分はアダプタに閉じてあり、実行の骨格（起動�
 同時実行）はどの CLI にも依存しない。
 
 ```
-server.mjs              MCP プロトコル・tool 定義・引数検証・応答の組み立て
-lib/engine.mjs          プロセスの起動/監視/打ち切り/完了判定/孤児回収と永続化
-lib/git.mjs             git の状態取得と差分
-lib/runs.mjs            run の記録
-lib/platform.mjs        プロセスの同定（OS 差の吸収）
-lib/env.mjs             環境変数の読み出し（旧名の互換込み）
-lib/backends/codex.mjs  codex exec 固有（argv 組み立て・イベント解釈・モデル一覧）
+server.mjs               MCP プロトコル・tool 定義・引数検証・応答の組み立て
+lib/engine.mjs           プロセスの起動/監視/打ち切り/完了判定/孤児回収と永続化
+lib/git.mjs              git の状態取得と差分
+lib/runs.mjs             run の記録
+lib/platform.mjs         プロセスの同定（OS 差の吸収）
+lib/env.mjs              環境変数の読み出し（旧名の互換込み）
+lib/backends/index.mjs   モデル名 → アダプタの解決
+lib/backends/codex.mjs   codex exec 固有
+lib/backends/claude.mjs  claude -p 固有
 ```
 
 アダプタは `runs.mjs` も `child_process` も import しない。永続化も spawn もせず、
-純関数だけを公開する（argv 組み立てとイベント解釈が spawn 無しでテストできる）。
+**純関数だけを公開する**。イベント解析は「1 行 → delta」を返すだけで、meta の更新・
+セッション索引の登録・報告の追記は engine 側が行う。おかげで argv 組み立てとイベント
+解釈が spawn 無しでテストでき、その部分は **Windows でも走る**（`test/resolve.test.mjs`）。
 
 ## 背景
 
@@ -35,8 +62,8 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 
 | tool | 役割 |
 |---|---|
-| `consult` | read-only で相談する。調査・レビュー・設計相談 |
-| `apply` | workspace-write で作業させる。git 管理下のみ |
+| `consult` | 読み取り専用で相談する。調査・レビュー・設計相談 |
+| `apply` | 書き込み可で作業させる。git 管理下のみ |
 | `status` | 切り離した run の進捗を見る |
 | `result` | 切り離した run の報告を取る |
 | `runs` | 最近の run を一覧する |
@@ -132,6 +159,72 @@ TOOL_MODES の既定      ← 全端末の基準
 実行したコマンドを書かせるのが肝で、呼び出し側は同じコマンドを 1 回打つだけで裏取り
 できる。`scope: "open"` でも外れない（範囲の指示とは別の話なので）。`consult` には
 添えない——read-only ではそもそも走らないため。
+
+## claude バックエンドについて実測したこと（2.1.277 / Windows）
+
+| 確かめたこと | 結果 |
+|---|---|
+| `--verbose` | `--output-format stream-json` は `--verbose` が無いと JSONL を吐かない。**静かに壊れる**ので無条件で付け、argv をテストで固定している |
+| 委譲の禁止 | `--tools` に `Task` を含めなければサブエージェントは**物理的に存在しない**。codex では prompt で頼むしかなかったものが、ここでは強制できる。よって `SOLO_NOTE` は claude では添えない |
+| 再帰の防止 | `--strict-mcp-config`（`--mcp-config` 無し）で `mcp_servers: []`。これが無いと子がこのサーバ自身を読み込む |
+| effort | `low` / `medium` / `high` / `xhigh` / `max`。**`ultra` は無い**（codex にはある） |
+| 孤児回収のマーカー | `-n <run_id>` が実プロセスのコマンドラインにそのまま現れる。`claude.exe` は node ラッパーではなく単一のネイティブプロセス |
+| resume | 通常の argv に `--resume <id>` を足すだけ。`--model` / `--effort` / `--tools` もそのまま通る（codex の resume は `-s` / `-C` / `--color` を拒否する） |
+| session_id | resume しても**同じ値**が返る。既存のセッション索引がそのまま使える |
+| 認証 | `apiKeySource: "none"` = **前景セッションと同じサブスク枠**を消費する |
+
+### 書き込みの制限は OS サンドボックスではない
+
+ここが codex との最大の非対称。実測した挙動:
+
+| モード | `node --test` | cwd の外への書き込み |
+|---|---|---|
+| `acceptEdits` | **拒否** | 拒否 |
+| `acceptEdits` + `--allowedTools "Bash(node --test*)"` | **通る** | 拒否 |
+| `bypassPermissions` | 通る | **通る（拘束が外れる）** |
+
+- `acceptEdits` は Bash を「安全と判定できるコマンド」だけ自動承認する。`echo` や
+  `git status --porcelain` は通るが、`node --test` は拒否される（`--permission-prompts none`
+  なので承認者が居らず deny になる）。
+- cwd の外への書き込みは、`Write` でも `Bash` でも、`node -e` で間接的に書こうとしても
+  **すべて拒否された**。codex の `workspace-write` ほど強い保証ではないが、想定より近い。
+- `bypassPermissions` にすると `printf > <cwd 外の絶対パス>` が**通ってしまう**ことを
+  実測で確認した。拘束が完全に外れるので**採らない**。
+
+したがって `apply` は **`acceptEdits`** で動かし、`apply` の応答にはこの非対称を注記として
+添える。戻せることは「cwd が git 管理下であること」と応答に付く `git diff` が担保する。
+
+### テストを走らせるには許可リストが要る
+
+上のとおり `node --test` や `uv run pytest` は既定では拒否される。つまり claude の `apply`
+では、そのままだと [`TEST_NOTE`](#作業範囲) を満たせない。許可するコマンドは利用者が
+環境変数で宣言する:
+
+```bash
+AGENT_EXEC_CLAUDE_ALLOWED_TOOLS='Bash(node --test*)  Bash(uv run pytest*)'
+```
+
+**既定は空にしてある。** ここに何を書くかは「どのコマンドを無条件で実行してよいか」の
+宣言そのものなので、こちらで埋めると利用者が意図しないコマンドが走る。未設定のときは
+テストが拒否され、その事実が応答に出る:
+
+```
+⚠ 次の操作は許可されていないため実行されませんでした:
+  - Bash: node --test
+  許可するには AGENT_EXEC_CLAUDE_ALLOWED_TOOLS に追加してください（例: "Bash(node --test*)"）。
+```
+
+黙って「テストは走りませんでした」で終わらせないのが肝で、原因と直し方が同じ場所に出る。
+
+### 親セッションの環境変数を子から消す
+
+このサーバは Claude Code の子プロセスとして動くので、`CLAUDE_CODE_*` / `CLAUDECODE` /
+`CLAUDE_PID` / `CLAUDE_EFFORT` が環境に入っている（実測で 10 個）。そのまま渡すと、子が
+親のセッション ID や messaging socket を受け取り、`CLAUDE_EFFORT` は `--effort` と競合する。
+`AGENT_EXEC_*` / `CODEX_MCP_*` も消す（子が万一このサーバを読み込んでも同じ `runs/` を
+共有しないため）。
+
+`ANTHROPIC_*` は**消さない**。利用者がどの認証で課金するかを勝手に変えないため。
 
 ## クライアント側のタイムアウト
 
@@ -327,7 +420,7 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/protocol.te
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
-85 件。
+132 件。
 
 **Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
 実行できない（`spawn EFTYPE`）。spawn を伴わない検証は通るが、それ以外は全滅する。
@@ -349,7 +442,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 5.0.0
+現在: 6.0.0
 ```
 
 | version | 変更 |
@@ -367,6 +460,7 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 | 3.8.0 / 3.9.0 | （記録漏れ。コードは 3.9.0 だったが、この表は 3.7.0 で止まっていた） |
 | 4.0.0 | `codex_verify` を削除。`model` / `reasoning_effort` を tool 引数から外し、環境変数のみに。`apply` にテスト実行と申告の指示を追加 |
 | 5.0.0 | `codex-exec` → `agent-exec` に改名（tool 名も `consult` / `apply` / …）。CLI 固有の部分を `lib/backends/` のアダプタへ分離。環境変数を `AGENT_EXEC_*` へ（旧名も読む）。生死判定を 3 値化 |
+| 6.0.0 | `claude -p` を追加。**モデル名で起動する CLI が決まる**（`backend` 引数は作らない）。claude では委譲を argv で禁止し、拒否された操作を応答に載せる。backend をまたぐ resume を拒否 |
 
 ## 環境変数
 
@@ -374,6 +468,8 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 |---|---|---|
 | `CODEX_BIN` | `codex` | codex 実行ファイル |
 | `CODEX_HOME` | `~/.codex` | `models_cache.json` の探索先 |
+| `CLAUDE_BIN` | `claude` | claude 実行ファイル |
+| `AGENT_EXEC_CLAUDE_ALLOWED_TOOLS` | （空） | claude で無条件に許すコマンド。テストを走らせるために要る（[上記](#テストを走らせるには許可リストが要る)）。2 個以上の空白かカンマ区切り |
 | `AGENT_EXEC_RUNS_DIR` | `~/.claude/agent-exec/runs` | run の記録先（clone の外に置く） |
 | `AGENT_EXEC_CONSULT_MODEL` | `gpt-6-astra` | `consult` のモデル |
 | `AGENT_EXEC_CONSULT_EFFORT` | `xhigh` | `consult` の effort |

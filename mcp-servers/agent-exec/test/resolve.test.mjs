@@ -1,0 +1,327 @@
+// モデル名 → アダプタの解決と、各アダプタの argv 組み立て・イベント解釈。
+//
+// すべて純関数なので spawn しない。**このファイルだけは Windows でも走る**
+// （他のテストはダミー CLI が shebang 付き .sh なので WSL / Linux / macOS が要る）。
+// 運用環境が Windows なので、ここに寄せられる検証は寄せる価値がある。
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import claudeBackend from "../lib/backends/claude.mjs";
+import codexBackend from "../lib/backends/codex.mjs";
+import { adapterById, resolveAdapter } from "../lib/backends/index.mjs";
+
+describe("モデル名からアダプタを決める", () => {
+  it("claude 系の名前は claude へ", () => {
+    for (const model of [
+      "opus",
+      "sonnet",
+      "haiku",
+      "fable",
+      "opus-4.5",
+      "sonnet[1m]",
+      "claude-opus-5",
+      "claude-haiku-4-5-20251001",
+      "us.anthropic.claude-sonnet-4",
+    ]) {
+      const r = resolveAdapter(model);
+      assert.equal(r.adapter.id, "claude", `${model} が claude に解決されない`);
+      assert.equal(r.confident, true, model);
+    }
+  });
+
+  it("codex 系の名前は codex へ", () => {
+    for (const model of ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.5", "codex-mini", "o3"]) {
+      const r = resolveAdapter(model);
+      assert.equal(r.adapter.id, "codex", `${model} が codex に解決されない`);
+      assert.equal(r.confident, true, model);
+    }
+  });
+
+  it("未指定は codex（従来の既定）", () => {
+    for (const model of [undefined, null, ""]) {
+      const r = resolveAdapter(model);
+      assert.equal(r.adapter.id, "codex");
+      assert.equal(r.model, undefined);
+      assert.equal(r.confident, true);
+    }
+  });
+
+  // キャッシュが古い／新しいモデルが出た、で正当な設定を弾くと毎 run 失敗する。
+  it("未知の名前は拒否せず codex へ倒し、confident=false で知らせる", () => {
+    const r = resolveAdapter("grok-9");
+    assert.equal(r.adapter.id, "codex");
+    assert.equal(r.model, "grok-9");
+    assert.equal(r.confident, false);
+  });
+
+  it("接頭辞で明示できる（命名規則が破られたときの逃げ道）", () => {
+    const a = resolveAdapter("claude:grok-9");
+    assert.equal(a.adapter.id, "claude");
+    assert.equal(a.model, "grok-9", "接頭辞は取り除かれる");
+
+    const b = resolveAdapter("codex:opus");
+    assert.equal(b.adapter.id, "codex");
+    assert.equal(b.model, "opus", "パターンより接頭辞が優先される");
+  });
+
+  it("adapterById は未知・未設定を既定へ倒す", () => {
+    assert.equal(adapterById("codex").id, "codex");
+    assert.equal(adapterById("claude").id, "claude");
+    assert.equal(adapterById(undefined).id, "codex", "古い記録は backend を持たない");
+    assert.equal(adapterById("nope").id, "codex");
+  });
+});
+
+describe("claude の argv", () => {
+  const base = { runId: "20260919-120000-000-abcd", cwd: "/repo", runDir: "/runs/x" };
+
+  it("読み取り専用では Bash も Write も Task も渡さない", () => {
+    const { argv } = claudeBackend.buildLaunch({
+      ...base,
+      capability: "read",
+      model: "opus",
+      effort: "xhigh",
+    });
+    const tools = argv[argv.indexOf("--tools") + 1];
+    for (const forbidden of ["Bash", "PowerShell", "Write", "Edit", "Task"]) {
+      assert.ok(!tools.split(",").includes(forbidden), `${forbidden} が許可されている: ${tools}`);
+    }
+    assert.ok(tools.split(",").includes("Read"), tools);
+    assert.ok(!argv.includes("--permission-mode"), "read で permission-mode は要らない");
+  });
+
+  it("書き込みでは acceptEdits と書き込み系ツールを渡す", () => {
+    const { argv } = claudeBackend.buildLaunch({ ...base, capability: "write", model: "opus" });
+    const tools = argv[argv.indexOf("--tools") + 1].split(",");
+    assert.ok(tools.includes("Bash"), tools.join(","));
+    assert.ok(tools.includes("Write"), tools.join(","));
+    assert.ok(!tools.includes("Task"), "既定で委譲を許してはいけない");
+    assert.equal(argv[argv.indexOf("--permission-mode") + 1], "acceptEdits");
+    // bypassPermissions は cwd の外へも書けてしまう（実測）。使わない。
+    assert.ok(!argv.includes("bypassPermissions"), argv.join(" "));
+  });
+
+  // --verbose を落とすと stream-json が JSONL にならず、静かに壊れる。
+  it("必ず付ける引数（落とすと静かに壊れるもの）", () => {
+    const { argv } = claudeBackend.buildLaunch({ ...base, capability: "read" });
+    for (const flag of ["-p", "--verbose", "--strict-mcp-config"]) {
+      assert.ok(argv.includes(flag), `${flag} が無い: ${argv.join(" ")}`);
+    }
+    assert.equal(argv[argv.indexOf("--output-format") + 1], "stream-json");
+    assert.equal(argv[argv.indexOf("--permission-prompts") + 1], "none");
+  });
+
+  it("マーカーは run_id で、argv に実際に現れる", () => {
+    const { argv, marker } = claudeBackend.buildLaunch({ ...base, capability: "read" });
+    assert.equal(marker, base.runId);
+    assert.ok(argv.some((a) => a.includes(marker)), argv.join(" "));
+    assert.equal(argv[argv.indexOf("-n") + 1], base.runId);
+  });
+
+  it("resume は通常の argv に --resume を足すだけ", () => {
+    const { argv } = claudeBackend.buildLaunch({
+      ...base,
+      capability: "read",
+      model: "opus",
+      resumeSessionId: "2a09c9a8-ac59-4508-b9ea-8dddcd38aaf2",
+    });
+    assert.equal(argv[argv.indexOf("--resume") + 1], "2a09c9a8-ac59-4508-b9ea-8dddcd38aaf2");
+    assert.equal(argv[argv.indexOf("--model") + 1], "opus", "resume でも model は渡せる");
+    assert.ok(argv.includes("--verbose"));
+  });
+
+  it("delegate: true のときだけ Task を足す", () => {
+    const { argv } = claudeBackend.buildLaunch({
+      ...base,
+      capability: "read",
+      delegate: true,
+    });
+    assert.ok(argv[argv.indexOf("--tools") + 1].split(",").includes("Task"));
+  });
+
+  it("ultra は受け付けない（claude の上限は max）", () => {
+    assert.equal(claudeBackend.supportsEffort("opus", "ultra"), false);
+    assert.equal(claudeBackend.supportsEffort("opus", "max"), true);
+    assert.ok(!claudeBackend.efforts.includes("ultra"));
+  });
+
+  it("親セッションの環境変数を子から消す", () => {
+    const saved = { ...process.env };
+    process.env.CLAUDE_CODE_SESSION_ID = "parent";
+    process.env.CLAUDECODE = "1";
+    process.env.CLAUDE_EFFORT = "max";
+    process.env.AGENT_EXEC_RUNS_DIR = "/somewhere";
+    try {
+      const { env } = claudeBackend.buildLaunch({ ...base, capability: "read" });
+      for (const key of [
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDECODE",
+        "CLAUDE_EFFORT",
+        "AGENT_EXEC_RUNS_DIR",
+      ]) {
+        assert.equal(env[key], undefined, `${key} が消えていない`);
+        assert.ok(key in env, `${key} の削除指示が無い`);
+      }
+    } finally {
+      process.env = saved;
+    }
+  });
+});
+
+describe("claude のイベント解釈", () => {
+  it("init から session_id を取る", () => {
+    const d = claudeBackend.parseEvent({
+      type: "system",
+      subtype: "init",
+      session_id: "abc",
+      tools: ["Read"],
+      mcp_servers: [],
+    });
+    assert.equal(d.sessionId, "abc");
+    assert.equal(d.abort, undefined);
+  });
+
+  // 再帰は課金が伸び続けるので、警告ではなく打ち切りにする。
+  it("MCP が継承されていたら abort を返す", () => {
+    const d = claudeBackend.parseEvent({
+      type: "system",
+      subtype: "init",
+      session_id: "abc",
+      mcp_servers: [{ name: "agent" }],
+    });
+    assert.match(d.abort, /strict-mcp-config/);
+  });
+
+  it("許可リストの綻び（Task が残っている）を記録する", () => {
+    const d = claudeBackend.parseEvent({
+      type: "system",
+      subtype: "init",
+      session_id: "abc",
+      tools: ["Read", "Task"],
+      mcp_servers: [],
+    });
+    assert.equal(d.extra.delegation_possible, true);
+  });
+
+  it("assistant の複数ブロックを 1 イベントから取り出す", () => {
+    const d = claudeBackend.parseEvent({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "thinking", thinking: "..." },
+          { type: "tool_use", name: "Bash", input: {} },
+          { type: "text", text: "報告本文" },
+        ],
+      },
+    });
+    assert.deepEqual(d.itemTypes, ["reasoning", "command_execution", "agent_message"]);
+    assert.deepEqual(d.messages, ["報告本文"]);
+  });
+
+  it("tool 名を codex と共通の語彙へ写像する", () => {
+    assert.equal(claudeBackend.itemTypeFor("Bash"), "command_execution");
+    assert.equal(claudeBackend.itemTypeFor("Write"), "file_change");
+    assert.equal(claudeBackend.itemTypeFor("Read"), "file_read");
+    assert.equal(claudeBackend.itemTypeFor("Nonesuch"), "tool:Nonesuch");
+  });
+
+  it("tool_result は数えない（tool_use で数えているので二重になる）", () => {
+    assert.equal(claudeBackend.parseEvent({ type: "user", message: { content: [] } }), null);
+  });
+
+  it("result から最終報告・usage・完了を取る", () => {
+    const d = claudeBackend.parseEvent({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "FINAL",
+      usage: { input_tokens: 1 },
+      total_cost_usd: 0.5,
+      num_turns: 3,
+      permission_denials: [],
+      subagent_stats: { spawned: 0 },
+    });
+    assert.equal(d.completed, true);
+    assert.equal(d.finalMessage, "FINAL", "engine が last-message.txt を書くための値");
+    assert.deepEqual(d.usage, { input_tokens: 1 });
+    assert.equal(d.extra.cost_usd, 0.5);
+  });
+
+  // 「テストを実行できなかった」の原因がここに出る。捨てると理由が分からない。
+  it("permission_denials を残す", () => {
+    const d = claudeBackend.parseEvent({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "x",
+      permission_denials: [{ tool_name: "Bash", tool_input: { command: "node --test" } }],
+      subagent_stats: { spawned: 0 },
+    });
+    assert.deepEqual(d.extra.permission_denials, [
+      { tool_name: "Bash", command: "node --test" },
+    ]);
+  });
+
+  it("is_error の result は failure にする（finalMessage にしない）", () => {
+    const d = claudeBackend.parseEvent({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      result: "なにか失敗",
+      permission_denials: [],
+      subagent_stats: { spawned: 0 },
+    });
+    assert.equal(d.completed, true);
+    assert.equal(d.failure, "なにか失敗");
+    assert.equal(d.finalMessage, undefined);
+  });
+
+  it("thinking の署名は events.jsonl から落とす", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "thinking", thinking: "x".repeat(5000), signature: "sig" }] },
+    });
+    const shrunk = JSON.parse(claudeBackend.shrinkEventLine(line));
+    assert.equal(shrunk.message.content[0].thinking, "（省略）");
+  });
+});
+
+describe("codex アダプタ（純関数の側）", () => {
+  it("マーカーが argv に現れる（-o のパス経由）", () => {
+    const runId = "20260919-120000-000-abcd";
+    const { argv, marker } = codexBackend.buildLaunch({
+      runId,
+      runDir: `/runs/${runId}`,
+      capability: "read",
+      cwd: "/repo",
+      skipGitRepoCheck: true,
+    });
+    assert.equal(marker, runId);
+    assert.ok(argv.some((a) => a.includes(runId)), argv.join(" "));
+  });
+
+  it("capability を sandbox 値へ訳す", () => {
+    assert.equal(codexBackend.sandbox("read").label, "read-only");
+    assert.equal(codexBackend.sandbox("write").label, "workspace-write");
+    assert.equal(codexBackend.sandbox("write").enforcement, "os-sandbox");
+    // claude 側は OS サンドボックスではないことを型として区別する
+    assert.equal(claudeBackend.sandbox("write").enforcement, "tool-allowlist");
+    assert.match(claudeBackend.sandbox("write").caveat, /OS サンドボックス/);
+  });
+
+  it("item.completed を共通語彙の配列で返す", () => {
+    const d = codexBackend.parseEvent({
+      type: "item.completed",
+      item: { type: "agent_message", text: "本文" },
+    });
+    assert.deepEqual(d.itemTypes, ["agent_message"]);
+    assert.deepEqual(d.messages, ["本文"]);
+  });
+
+  // codex は -o が last-message.txt を書く。engine が二重に書かないこと。
+  it("最終メッセージを返さない（-o に任せる）", () => {
+    const d = codexBackend.parseEvent({ type: "turn.completed", usage: { input_tokens: 1 } });
+    assert.equal(d.completed, true);
+    assert.equal(d.finalMessage, undefined);
+  });
+});
