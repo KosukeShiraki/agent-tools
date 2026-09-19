@@ -115,8 +115,15 @@ function applyDelta(record, delta, runId) {
     updateMeta(runId, { thread_id: delta.sessionId, session_id: delta.sessionId });
     const meta = readMeta(runId);
     if (meta) {
-      // run が prune されても resume できるよう、索引は別に持つ。
-      recordSession(delta.sessionId, { run_id: runId, cwd: meta.cwd, tool: meta.tool });
+      // run が prune されても resume できるよう、索引は別に持つ。backend もここに
+      // 書く。run 本体から引くと、prune で run が消えた後に「どの CLI のセッションか」
+      // が分からなくなり、resume が codex 扱いに倒れて拒否される。
+      recordSession(delta.sessionId, {
+        run_id: runId,
+        cwd: meta.cwd,
+        tool: meta.tool,
+        backend: record.adapter.id,
+      });
     }
   }
   for (const itemType of delta.itemTypes ?? []) {
@@ -205,7 +212,10 @@ export function launch({ runId, adapter, argv, marker, prompt, cwd, env, onFinis
 
   const finalize = ({ code, signal }) => {
     if (record.state !== "running") return;
-    clearTimeout(record.killTimer);
+    // 打ち切り中は SIGKILL の予約を残す。親 CLI が先に終了しても、SIGTERM を
+    // 無視した孫が同じプロセスグループに残っていることがあるため（F-02）。
+    // 予約が発火するか、打ち切りでない終了なら、ここで解除してよい。
+    if (!record.killing) clearTimeout(record.killTimer);
     clearTimeout(record.settleTimer);
     record.state = record.spawnFailed
       ? "failed"
@@ -344,13 +354,22 @@ export function killRun(runId, reason) {
   if (!record) return false;
   if (record.killTimer) return true; // 二重に呼ばれても一度しか仕掛けない
   record.killReason = reason ?? "打ち切りました";
+  // 打ち切り要求中であることを残す。これが立っている間は、親 CLI が先に終わって
+  // finalize が走っても SIGKILL の予約を取り消さない（下記）。
+  record.killing = true;
   killTree(record.child.pid, "SIGTERM");
-  // 予約した SIGKILL を完了後に撃つと、PID が再利用された別のプロセスグループを
-  // 巻き込む。finalize で必ず解除し、発火時にも状態を確かめる。
   record.killTimer = setTimeout(() => {
-    if (record.state !== "running") return;
+    // 「親 CLI が終了した」と「run のプロセス群が止まった」は別物である。
+    // 親が SIGTERM で素直に落ちても、SIGTERM を無視する孫が同じプロセスグループに
+    // 残ることがある。以前はここで record.state を見ていたため、親の exit で
+    // finalize が走ると（1 秒後）この SIGKILL が撃たれず、孫が生き延びていた。
+    // 見るのは run の状態ではなく「打ち切りが完了したか」にする。
+    if (!record.killing) return;
+    record.killing = false;
+    // PID 再利用への誤爆が心配な処理だが、SIGTERM を送ってから 3 秒以内であり、
+    // その間に PID が一周して別プロセスに割り当たることは事実上ない。
     killTree(record.child.pid, "SIGKILL");
-    // 孫が stdout を握ったままでも必ず確定させる
+    // 孫が stdout を握ったままでも必ず確定させる（finalize 済みなら何もしない）
     record.settleTimer = setTimeout(
       () => record.finalize({ code: null, signal: "SIGKILL" }),
       KILL_SETTLE_MS,

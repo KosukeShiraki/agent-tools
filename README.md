@@ -63,7 +63,7 @@ MCP サーバのコードを更新した場合、**動いているサーバプ�
 cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 ```
 
-実 Codex は呼ばず、ダミーに差し替えて 134 件を検証する。
+実 Codex は呼ばず、ダミーに差し替えて 140 件を検証する。
 
 **Windows では走らない**（ダミーが shebang 付きの `.sh` で、Windows は実行できない）。
 WSL / Linux / macOS で実行すること。

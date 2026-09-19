@@ -890,6 +890,48 @@ describe("同じ repo での並行 apply", () => {
     const third = await server.call("apply", { prompt: "次の作業", cwd: ws.gitDir }, {}, 40_000);
     assert.equal(third.result.isError, undefined, textOf(third.result));
   });
+
+  // 使用中チェックと予約の間に await があると、両方が「未使用」と判定してから
+  // 待機に入り、どちらも起動できてしまう。予約は最初の await より前に置く。
+  it("同時に投げても 1 本しか通らない（予約の競合）", async () => {
+    const [a, b] = await Promise.all([
+      server.call("apply", { prompt: "A", cwd: ws.gitDir, timeout_ms: 1200 }, {}, 40_000),
+      server.call("apply", { prompt: "B", cwd: ws.gitDir, timeout_ms: 1200 }, {}, 40_000),
+    ]);
+    const texts = [textOf(a.result), textOf(b.result)];
+    const rejected = texts.filter((t) => /同じリポジトリで apply が実行中/.test(t));
+    assert.equal(rejected.length, 1, `1 本だけ弾かれるはず:\n${texts.join("\n---\n")}`);
+    // 通った方の後始末（次のテストのために repo を空ける）
+    const ok = texts.find((t) => !/同じリポジトリで apply が実行中/.test(t));
+    const okId = runIdOf(ok);
+    if (okId) await server.call("result", { run_id: okId, wait_ms: 20_000 }, {}, 40_000);
+  });
+
+  it("スロット待ちを経由しても 1 本しか通らない", async () => {
+    // 並列枠を 1 にして、別 repo の run で枠を塞いでから同じ repo へ 2 本投げる
+    const narrow = startServer(
+      ws.env({ CODEX_FAKE_SLEEP: "3", AGENT_EXEC_MAX_CONCURRENCY: "1" }),
+    );
+    try {
+      const blocker = await narrow.call(
+        "consult",
+        { prompt: "枠を塞ぐ", cwd: ws.plainDir, timeout_ms: 1200 },
+        {},
+        40_000,
+      );
+      assert.match(textOf(blocker.result), /切り離しました/);
+
+      const [a, b] = await Promise.all([
+        narrow.call("apply", { prompt: "A", cwd: ws.gitDir, timeout_ms: 25_000 }, {}, 60_000),
+        narrow.call("apply", { prompt: "B", cwd: ws.gitDir, timeout_ms: 25_000 }, {}, 60_000),
+      ]);
+      const texts = [textOf(a.result), textOf(b.result)];
+      const rejected = texts.filter((t) => /同じリポジトリで apply が実行中/.test(t));
+      assert.equal(rejected.length, 1, `1 本だけ弾かれるはず:\n${texts.join("\n---\n")}`);
+    } finally {
+      narrow.close();
+    }
+  });
 });
 
 describe("codex 側のエラー", () => {

@@ -46,7 +46,7 @@ import {
 } from "./lib/runs.mjs";
 
 const SERVER_NAME = "agent-exec";
-const SERVER_VERSION = "6.1.1";
+const SERVER_VERSION = "6.2.0";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 // 反射してよいのはサポートしている版だけ。未知の版には自分の版を返す。
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -477,8 +477,10 @@ function toArgs(params) {
 function findSessionOrigin(sessionId, cwd) {
   const indexed = lookupSession(sessionId);
   if (indexed?.cwd) {
-    // 索引には backend を持たせていないので、run 本体から補う（消えていれば undefined）。
-    return { ...indexed, backend: readMeta(indexed.run_id)?.backend };
+    // 索引の backend を優先する。run 本体から引くだけだと、prune で run が消えた後に
+    // undefined になり、codex 扱いへ倒れて claude のセッションが再開できなくなる。
+    // 索引を先に見て、無いとき（6.1.1 以前に作られた索引）だけ run 本体で補う。
+    return { ...indexed, backend: indexed.backend ?? readMeta(indexed.run_id)?.backend };
   }
   // 索引が無い古い記録との互換。同じ session_id の run が並ぶので cwd 一致を優先する。
   let fallback;
@@ -793,11 +795,23 @@ async function handleRun(toolName, params) {
     effectivePrompt,
   );
 
+  // repo の予約は **最初の await より前**に置く。上の使用中チェックとここの間に
+  // await があると、同じ repo への 2 本がどちらも「未使用」と判定してから待機に入り、
+  // 両方が起動できてしまう（スロットに空きがある場合でも、await が微小タスクへ
+  // 譲るので次の要求が割り込む）。予約はスロット取得の失敗・起動失敗・完了の
+  // すべての経路で解除する。
+  if (repoRoot) activeRepos.set(repoRoot, runId);
+  const releaseRepo = () => {
+    if (repoRoot && activeRepos.get(repoRoot) === runId)
+      activeRepos.delete(repoRoot);
+  };
+
   // timeout_ms は「同期で待つ上限」なので、待ち行列と実行待ちで合計してもこれを超えない。
   const deadline = Date.now() + timeoutMs;
 
   const gotSlot = await acquireSlot(Math.max(0, deadline - Date.now()));
   if (!gotSlot) {
+    releaseRepo();
     updateMeta(runId, {
       state: "failed",
       note: "同時実行の空きを待てませんでした",
@@ -808,12 +822,6 @@ async function handleRun(toolName, params) {
         "status で進捗を確認するか、時間をおいて再試行してください。",
     );
   }
-
-  if (repoRoot) activeRepos.set(repoRoot, runId);
-  const releaseRepo = () => {
-    if (repoRoot && activeRepos.get(repoRoot) === runId)
-      activeRepos.delete(repoRoot);
-  };
 
   let launched;
   const plan = adapter.buildLaunch({
@@ -1230,15 +1238,24 @@ async function handleResult(params) {
         `\n--- codex stderr（末尾）---\n${readArtifact(runId, "stderr.log").trim() || "（空）"}\n`,
     );
   }
-  const report = `${header}\n\n--- 報告（${body.source}）---\n${truncateMiddle(body.text, MAX_OUTPUT_CHARS)}\n${diffText}`;
+  // 拒否された操作は同期応答と同じように出す。ここに無いと、切り離した run
+  // （= 長い apply、つまり拒否が起きやすい方）でだけ「テストを実行できなかった」
+  // が消える。実際、記録にある denials 4 件のうち 3 件が切り離し経路だった。
+  const report =
+    `${header}\n\n--- 報告（${body.source}）---\n` +
+    `${truncateMiddle(body.text, MAX_OUTPUT_CHARS)}\n${diffText}${formatDenials(current)}`;
   // 同期の応答と機械的な成否判定を揃える（本文は残したまま isError を立てる）。
-  if (current.state === "failed" || current.state === "killed") {
-    const why =
-      current.state === "failed"
+  // state だけでなく failure も見る。CLI がイベントで失敗を伝えつつ exit 0 で
+  // 終えると state は completed になり、同期応答だけが isError を返していた。
+  if (current.state === "failed" || current.state === "killed" || current.failure) {
+    const why = current.failure
+      ? current.failure
+      : current.state === "failed"
         ? `exit=${current.exit_code ?? "不明"} signal=${current.signal ?? "なし"}`
         : (current.note ?? "打ち切られました");
+    const state = current.failure && current.state === "completed" ? "失敗" : current.state;
     return errorResult(
-      `${report}\n--- この run は ${current.state} で終わっています（${why}）---\n` +
+      `${report}\n--- この run は ${state} で終わっています（${why}）---\n` +
         `stderr（末尾）: ${readArtifact(runId, "stderr.log").trim().slice(-2_000) || "（空）"}`,
     );
   }

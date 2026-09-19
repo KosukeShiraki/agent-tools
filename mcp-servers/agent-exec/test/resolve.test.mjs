@@ -148,6 +148,7 @@ describe("claude の argv", () => {
   it("親セッションの環境変数を子から消す", () => {
     const saved = { ...process.env };
     process.env.CLAUDE_CODE_SESSION_ID = "parent";
+    process.env.CLAUDE_CODE_MESSAGING_SOCKET = "\\\\.\\pipe\\x";
     process.env.CLAUDECODE = "1";
     process.env.CLAUDE_EFFORT = "max";
     process.env.AGENT_EXEC_RUNS_DIR = "/somewhere";
@@ -155,12 +156,36 @@ describe("claude の argv", () => {
       const { env } = claudeBackend.buildLaunch({ ...base, capability: "read" });
       for (const key of [
         "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
         "CLAUDECODE",
         "CLAUDE_EFFORT",
         "AGENT_EXEC_RUNS_DIR",
       ]) {
         assert.equal(env[key], undefined, `${key} が消えていない`);
         assert.ok(key in env, `${key} の削除指示が無い`);
+      }
+    } finally {
+      process.env = saved;
+    }
+  });
+
+  // CLAUDE_CODE_* を前方一致で消すと接続先の設定まで巻き込む。消し漏れは
+  // 子がセッション ID を誤認する程度だが、接続先を消すと run ごと別の所へ行く。
+  it("接続先と認証の環境変数は残す", () => {
+    const saved = { ...process.env };
+    process.env.CLAUDE_CODE_USE_BEDROCK = "1";
+    process.env.CLAUDE_CODE_USE_VERTEX = "1";
+    process.env.CLAUDE_CODE_USE_FOUNDRY = "1";
+    process.env.ANTHROPIC_API_KEY = "sk-test";
+    try {
+      const { env } = claudeBackend.buildLaunch({ ...base, capability: "read" });
+      for (const key of [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "ANTHROPIC_API_KEY",
+      ]) {
+        assert.ok(!(key in env), `${key} を消してはいけない`);
       }
     } finally {
       process.env = saved;

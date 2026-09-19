@@ -174,6 +174,99 @@ describe("claude の異常系", () => {
     }
   });
 
+  // 切り離した run ほど長く、拒否も起きやすい。result に出ないと、一番必要な
+  // ときだけ「テストを実行できなかった」が消える。
+  it("切り離して result で取っても拒否が出る", async () => {
+    const server = startServer(
+      ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_DENIAL: "uv run pytest", CLAUDE_FAKE_SLEEP: "4" }),
+    );
+    try {
+      const first = await server.call(
+        "apply",
+        { prompt: "テストして", cwd: ws.gitDir, timeout_ms: 1_000 },
+        {},
+        20_000,
+      );
+      assert.match(textOf(first.result), /切り離しました/);
+      const runId = runIdOf(textOf(first.result));
+      const res = await server.call("result", { run_id: runId, wait_ms: 20_000 }, {}, 30_000);
+      const text = textOf(res.result);
+      assert.match(text, /uv run pytest/, "result に拒否が出ていない");
+      assert.match(text, /AGENT_EXEC_CLAUDE_ALLOWED_TOOLS/);
+    } finally {
+      server.close();
+    }
+  });
+
+  // CLI がイベントで失敗を伝えつつ exit 0 で終えると state は completed になる。
+  // 同期応答だけが isError を返し、result は成功扱いになっていた。
+  it("失敗イベント + exit 0 でも result は失敗として返す", async () => {
+    const server = startServer(
+      ws.env({
+        ...CLAUDE_ENV,
+        CLAUDE_FAKE_ERROR_RESULT: "model not available",
+        CLAUDE_FAKE_SLEEP: "4",
+      }),
+    );
+    try {
+      const first = await server.call(
+        "consult",
+        { prompt: "x", cwd: ws.plainDir, timeout_ms: 1_000 },
+        {},
+        20_000,
+      );
+      const runId = runIdOf(textOf(first.result));
+      const res = await server.call("result", { run_id: runId, wait_ms: 20_000 }, {}, 30_000);
+      assert.equal(res.result.isError, true, textOf(res.result));
+      assert.match(textOf(res.result), /model not available/);
+    } finally {
+      server.close();
+    }
+  });
+});
+
+describe("セッション索引だけで resume できる", () => {
+  let ws;
+
+  before(() => {
+    ws = makeWorkspace("sessionidx");
+  });
+  after(() => rmSync(ws.root, { recursive: true, force: true }));
+
+  // 索引を run 本体と別寿命にしているのは「run が消えても会話を続ける」ため。
+  // backend を索引に書いていないと、run が prune された後に codex 扱いへ倒れ、
+  // claude のセッションが「別の CLI で作られています」と拒否されていた。
+  it("run が消えても claude のセッションと分かる", async () => {
+    const server = startServer(ws.env(CLAUDE_ENV));
+    let runId;
+    try {
+      const res = await server.call("consult", { prompt: "最初", cwd: ws.plainDir });
+      runId = runIdOf(textOf(res.result));
+      const indexed = JSON.parse(
+        read(join(ws.runsDir, "sessions", `${FAKE_SESSION_ID}.json`), "utf8"),
+      );
+      assert.equal(indexed.backend, "claude", "索引に backend が無い");
+    } finally {
+      server.close();
+    }
+
+    // run 本体だけ消す（prune や保持期限で起きる状態を再現する）
+    rmSync(join(ws.runsDir, runId), { recursive: true, force: true });
+
+    const after = startServer(ws.env(CLAUDE_ENV));
+    try {
+      const res = await after.call("consult", {
+        prompt: "続きを",
+        cwd: ws.plainDir,
+        resume_session_id: FAKE_SESSION_ID,
+      });
+      assert.equal(res.result.isError, undefined, textOf(res.result));
+      assert.ok(!textOf(res.result).includes("別の CLI"), textOf(res.result));
+    } finally {
+      after.close();
+    }
+  });
+
   // 再帰は課金が伸び続けるので、警告ではなく打ち切りにする。
   it("子が MCP を継承していたら打ち切る", async () => {
     const server = startServer(

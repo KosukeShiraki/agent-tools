@@ -47,15 +47,31 @@ const SANDBOX = {
   },
 };
 
-// 親セッションの環境変数が子を誤動作させる。子から消すもの:
-//   CLAUDE_CODE_* / CLAUDECODE / CLAUDE_PID  親のセッション ID や messaging socket。
-//                                            子が「自分は親のセッションだ」と誤認する
-//   CLAUDE_EFFORT                            --effort と競合する
-//   AGENT_EXEC_* / CODEX_MCP_*               子が万一このサーバを読み込んでも
-//                                            同じ runs/ を共有しないための保険
+// 親セッションの環境変数が子を誤動作させるので落とす。ただし **`CLAUDE_CODE_*` を
+// 前方一致で消してはいけない**。この接頭辞には接続先の設定も混ざっていて、たとえば
+// `CLAUDE_CODE_USE_BEDROCK` を消すと、Bedrock を使う設定の端末で子が第一者 API へ
+// 向いてしまう（設定ファイル側に同じ指定が無ければ、意図しない課金先になる）。
+//
+// 失敗の重さが非対称なのが判断の理由:
+//   - セッション固有の変数が消し漏れる → 子が自分のセッション ID を誤認する程度
+//   - 接続先の変数を消してしまう       → run そのものが意図と違う所へ行く
+// そこで前方一致ではなく、実測で確認したセッション固有の変数を名指しで消す。
+// Claude Code が新しいセッション変数を増やしたらここに足す。
+const SCRUB_EXACT = [
+  "CLAUDECODE",
+  "CLAUDE_PID",
+  "CLAUDE_EFFORT", // --effort と競合する
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_MESSAGING_SOCKET", // 子が親へメッセージを送れてしまう
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_CODE_SESSION_ID",
+];
+// 自分のもの。子が万一このサーバを読み込んでも同じ runs/ を共有しないための保険。
+const SCRUB_PREFIXES = ["AGENT_EXEC_", "CODEX_MCP_"];
 // ANTHROPIC_* は落とさない。利用者がどの認証で課金するかを勝手に変えないため。
-const SCRUB_PREFIXES = ["CLAUDE_CODE", "AGENT_EXEC_", "CODEX_MCP_"];
-const SCRUB_EXACT = ["CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT"];
 
 function scrubbedEnv() {
   const env = {};
