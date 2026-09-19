@@ -66,15 +66,6 @@ export function isRunAlive(meta) {
   return processHasMarker(meta.pid, meta.run_id);
 }
 
-// TOML の literal string（single quote）はエスケープを解釈しないので、Windows の
-// `C:\Users\...` のような path も壊れない。単一引用符と改行だけは表現できない。
-function tomlLiteral(value) {
-  if (value.includes("'") || value.includes("\n")) {
-    throw new Error(`この path は TOML に埋め込めません（' か改行を含む）: ${value}`);
-  }
-  return `'${value}'`;
-}
-
 export function buildArgs({
   sandbox,
   cwd,
@@ -83,8 +74,6 @@ export function buildArgs({
   resumeSessionId,
   lastMessagePath,
   skipGitRepoCheck,
-  isolated,
-  writableRoots,
 }) {
   const args = ["exec"];
   if (resumeSessionId) {
@@ -97,17 +86,6 @@ export function buildArgs({
   }
   args.push("--json", "-o", lastMessagePath);
   if (skipGitRepoCheck) args.push("--skip-git-repo-check");
-  if (isolated) {
-    // workspace-write は既定で /tmp と $TMPDIR も書けてしまう（実測で確認）。
-    // これを外すと、書けるのは cwd 配下だけになる。cwd の外は読めるが書けない。
-    args.push("-c", "sandbox_workspace_write.exclude_slash_tmp=true");
-    args.push("-c", "sandbox_workspace_write.exclude_tmpdir_env_var=true");
-    if (writableRoots?.length) {
-      // cwd の外にも書き込みを許す場所（run をまたいで共有する cache）。
-      const list = writableRoots.map((root) => tomlLiteral(root)).join(", ");
-      args.push("-c", `sandbox_workspace_write.writable_roots=[${list}]`);
-    }
-  }
   if (model) args.push("-m", model);
   // model / effort / sandbox はいずれも検証済みの値のみ埋め込む。
   if (effort) args.push("-c", `model_reasoning_effort="${effort}"`);

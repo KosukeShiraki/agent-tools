@@ -54,7 +54,7 @@ describe("MCP プロトコル", () => {
     assert.deepEqual(res.result, {});
   });
 
-  it("tools/list が 6 ツールを返す", async () => {
+  it("tools/list が 5 ツールを返す", async () => {
     const res = await server.request("tools/list", {});
     const names = res.result.tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
@@ -63,7 +63,6 @@ describe("MCP プロトコル", () => {
       "codex_result",
       "codex_runs",
       "codex_status",
-      "codex_verify",
     ]);
 
     const byName = Object.fromEntries(res.result.tools.map((t) => [t.name, t.inputSchema]));
@@ -72,19 +71,9 @@ describe("MCP プロトコル", () => {
     assert.deepEqual(byName.codex_status.required, ["run_id"]);
     assert.deepEqual(byName.codex_result.required, ["run_id"]);
     assert.deepEqual(byName.codex_runs.required, []);
-    assert.deepEqual(byName.codex_verify.required.sort(), ["prompt", "target_dir"]);
-    assert.equal(byName.codex_verify.properties.cwd, undefined, "verify に cwd は無い");
 
     for (const name of ["codex_consult", "codex_apply"]) {
       const props = byName[name].properties;
-      assert.deepEqual(props.reasoning_effort.enum, [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-        "ultra",
-      ]);
       assert.ok(props.resume_session_id, `${name} に resume_session_id がない`);
       assert.ok(props.kill_on_timeout, `${name} に kill_on_timeout がない`);
     }
@@ -92,20 +81,29 @@ describe("MCP プロトコル", () => {
     assert.equal(byName.codex_consult.properties.scope, undefined);
   });
 
-  it("tools/list の説明が既定値を示す", async () => {
+  // モデルと effort は利用者（環境変数）だけが決める。schema に載せると呼び出し側の
+  // LLM が指定できてしまい、実運用では既定が毎回上書きされていた。
+  it("model と reasoning_effort は schema に無い", async () => {
     const res = await server.request("tools/list", {});
     const byName = Object.fromEntries(
       res.result.tools.map((t) => [t.name, t.inputSchema.properties]),
     );
-    assert.match(byName.codex_consult.model.description, /省略時は gpt-6-astra/);
-    assert.match(byName.codex_consult.reasoning_effort.description, /省略時は xhigh/);
-    assert.match(byName.codex_apply.model.description, /省略時は gpt-5\.6-luna/);
-    assert.match(byName.codex_apply.reasoning_effort.description, /省略時は max/);
-    // 既知モデルは visibility=list のみ
-    assert.match(
-      byName.codex_consult.model.description,
-      /既知のモデル: gpt-6-astra, gpt-5\.6-luna, gpt-5\.5$/,
-    );
+    for (const name of ["codex_consult", "codex_apply"]) {
+      assert.equal(byName[name].model, undefined, `${name} に model が残っている`);
+      assert.equal(
+        byName[name].reasoning_effort,
+        undefined,
+        `${name} に reasoning_effort が残っている`,
+      );
+    }
+  });
+
+  it("tools/list の説明が固定されたモデルを示す", async () => {
+    const res = await server.request("tools/list", {});
+    const byName = Object.fromEntries(res.result.tools.map((t) => [t.name, t.description]));
+    assert.match(byName.codex_consult, /モデルは gpt-6-astra .*effort=xhigh.*固定/);
+    assert.match(byName.codex_apply, /モデルは gpt-5\.6-luna .*effort=max.*固定/);
+    assert.match(byName.codex_consult, /呼び出し側からは変更できない/);
   });
 
   it("未対応メソッドは -32601 を返す", async () => {
@@ -205,37 +203,25 @@ describe("引数の検証", () => {
     assert.match(textOf(res.result), /未知の引数です: scope/);
   });
 
-  it("不正な reasoning_effort を実行前に弾く", async () => {
-    const res = await server.call("codex_consult", {
-      prompt: "x",
-      cwd: ws.plainDir,
-      reasoning_effort: "bogus",
-    });
-    assert.equal(res.result.isError, true);
-    assert.match(textOf(res.result), /reasoning_effort が不正/);
-  });
-
-  it("モデルが非対応の effort を明示指定したら弾く", async () => {
+  // 握り潰さず弾くのが肝。黙って無視すると、呼び出し側は指定が効いたと思い込む。
+  it("model は呼び出し側から渡せない", async () => {
     const res = await server.call("codex_consult", {
       prompt: "x",
       cwd: ws.plainDir,
       model: "gpt-5.5",
-      reasoning_effort: "ultra",
     });
     assert.equal(res.result.isError, true);
-    assert.match(textOf(res.result), /モデル gpt-5\.5 は reasoning_effort=ultra に対応していません/);
+    assert.match(textOf(res.result), /未知の引数です: model/);
   });
 
-  it("キャッシュに無いモデルは effort を検証せず通す", async () => {
+  it("reasoning_effort は呼び出し側から渡せない", async () => {
     const res = await server.call("codex_consult", {
       prompt: "x",
       cwd: ws.plainDir,
-      model: "gpt-unknown",
-      reasoning_effort: "ultra",
+      reasoning_effort: "low",
     });
-    assert.equal(res.result.isError, undefined, textOf(res.result));
-    const argv = argvOf(ws.argvFile);
-    assert.equal(argv[argv.indexOf("-m") + 1], "gpt-unknown");
+    assert.equal(res.result.isError, true);
+    assert.match(textOf(res.result), /未知の引数です: reasoning_effort/);
   });
 
   it("resume_session_id は UUID 形式のみ受け付ける", async () => {
@@ -349,7 +335,7 @@ describe("codex への引数の渡し方", () => {
     assert.ok(!argv.includes("--skip-git-repo-check"));
   });
 
-  it("既定は consult=astra/xhigh, apply=luna/max, verify=astra/low", async () => {
+  it("既定は consult=astra/xhigh, apply=luna/max", async () => {
     await server.call("codex_consult", { prompt: "x", cwd: ws.plainDir });
     const consultArgv = argvOf(ws.argvFile);
     assert.equal(consultArgv[consultArgv.indexOf("-m") + 1], "gpt-6-astra");
@@ -360,24 +346,6 @@ describe("codex への引数の渡し方", () => {
     const applyArgv = argvOf(ws.argvFile);
     assert.equal(applyArgv[applyArgv.indexOf("-m") + 1], "gpt-5.6-luna");
     assert.ok(applyArgv.includes('model_reasoning_effort="max"'), applyArgv.join(" "));
-
-    // 検証はテスト実行が主なので、モデルは据え置きで effort だけ低くしている
-    await server.call("codex_verify", { prompt: "x", target_dir: ws.gitDir });
-    const verifyArgv = argvOf(ws.argvFile);
-    assert.equal(verifyArgv[verifyArgv.indexOf("-m") + 1], "gpt-6-astra");
-    assert.ok(verifyArgv.includes('model_reasoning_effort="low"'), verifyArgv.join(" "));
-  });
-
-  it("明示指定は既定より優先される", async () => {
-    await server.call("codex_consult", {
-      prompt: "x",
-      cwd: ws.plainDir,
-      model: "gpt-5.5",
-      reasoning_effort: "low",
-    });
-    const argv = argvOf(ws.argvFile);
-    assert.equal(argv[argv.indexOf("-m") + 1], "gpt-5.5");
-    assert.ok(argv.includes('model_reasoning_effort="low"'));
   });
 
   it("resume 時は resume サブコマンドと sandbox_mode の override を使う", async () => {
@@ -422,6 +390,8 @@ describe("codex への引数の渡し方", () => {
     assert.ok(!argv.includes("--color"), argv.join(" "));
     assert.ok(!argv.includes("-s"), argv.join(" "));
     assert.ok(!argv.includes("-C"), argv.join(" "));
+    // -C が無いぶん、作業ディレクトリは spawn の cwd だけが決める（実 codex で確認済み）。
+    assert.equal(read(ws.pwdFile, "utf8").trim(), ws.plainDir);
     assert.match(read(ws.stdinFile, "utf8"), /^続きを/);
     assert.match(textOf(res.result), new RegExp(`${FAKE_THREAD_ID} から継続`));
   });
@@ -449,6 +419,27 @@ describe("codex への引数の渡し方", () => {
     const sent = read(ws.stdinFile, "utf8");
     assert.match(sent, /^自由にやって/);
     assert.ok(!sent.includes("指示された範囲のみを変更"), sent);
+  });
+
+  // 検証専用ツールを廃したので、テストを走らせるのは実装者の仕事になった。
+  // 実行したコマンドを申告させることで、呼び出し側が同じコマンドで裏取りできる。
+  it("codex_apply はテストの実行と申告を求める", async () => {
+    await server.call("codex_apply", { prompt: "直して", cwd: ws.gitDir });
+    const sent = read(ws.stdinFile, "utf8");
+    assert.match(sent, /テストを実行し/);
+    assert.match(sent, /実行したコマンドと結果/);
+    assert.match(sent, /実行しなかった場合/);
+  });
+
+  it("scope=open でもテストの指示は残る", async () => {
+    await server.call("codex_apply", { prompt: "x", cwd: ws.gitDir, scope: "open" });
+    assert.match(read(ws.stdinFile, "utf8"), /テストを実行し/);
+  });
+
+  it("codex_consult にはテストの指示を添えない", async () => {
+    // read-only ではテストが走らない（キャッシュが書けない）ので、求めても無意味
+    await server.call("codex_consult", { prompt: "調べて", cwd: ws.plainDir });
+    assert.ok(!read(ws.stdinFile, "utf8").includes("テストを実行し"));
   });
 
   it("codex_consult には範囲の指示を添えないが、委譲は既定で止める", async () => {
@@ -479,11 +470,6 @@ describe("codex への引数の渡し方", () => {
   it("codex_consult も delegate: true で委譲を許せる", async () => {
     await server.call("codex_consult", { prompt: "調べて", cwd: ws.plainDir, delegate: true });
     assert.equal(read(ws.stdinFile, "utf8"), "調べて");
-  });
-
-  it("codex_verify は既定で委譲しない", async () => {
-    await server.call("codex_verify", { prompt: "テストして", target_dir: ws.gitDir });
-    assert.match(read(ws.stdinFile, "utf8"), /サブエージェントへの委譲/);
   });
 
   it("delegate は真偽値のみ", async () => {
@@ -596,147 +582,5 @@ describe("既定の上書き", () => {
     } finally {
       server.close();
     }
-  });
-});
-
-describe("codex_verify（検証モード）", () => {
-  let ws;
-  let server;
-
-  before(() => {
-    ws = makeWorkspace("verify");
-    server = startServer(ws.env());
-  });
-  after(() => {
-    server.close();
-    rmSync(ws.root, { recursive: true, force: true });
-  });
-
-  it("対象を書けなくする設定を付け、作業ディレクトリは run 配下にする", async () => {
-    const res = await server.call("codex_verify", {
-      prompt: "テストを流して",
-      target_dir: ws.gitDir,
-    });
-    assert.equal(res.result.isError, undefined, textOf(res.result));
-    const argv = argvOf(ws.argvFile);
-
-    // workspace-write のままだと /tmp と $TMPDIR が書けてしまう（実 codex で確認済み）
-    assert.ok(argv.includes("sandbox_workspace_write.exclude_slash_tmp=true"), argv.join(" "));
-    assert.ok(argv.includes("sandbox_workspace_write.exclude_tmpdir_env_var=true"), argv.join(" "));
-    assert.equal(argv[argv.indexOf("-s") + 1], "workspace-write");
-
-    // -C と実際の cwd は run 配下の使い捨てディレクトリ（対象ディレクトリではない）
-    const passedCwd = argv[argv.indexOf("-C") + 1];
-    assert.match(passedCwd, /\/runs\/\d{8}-\d{6}-\d{3}-[a-z0-9]{4}\/workspace$/, passedCwd);
-    assert.equal(read(ws.pwdFile, "utf8").trim(), passedCwd);
-    assert.ok(!passedCwd.startsWith(ws.gitDir), "対象ディレクトリを作業場所にしている");
-
-    // 応答は「対象は読み取り専用」であることを示す
-    assert.match(textOf(res.result), new RegExp(`target=${ws.gitDir}（読み取り専用）`));
-  });
-
-  it("キャッシュは run をまたいで共有し、一時領域は run ごとに分ける", async () => {
-    const readEnv = () =>
-      Object.fromEntries(
-        read(ws.envFile, "utf8")
-          .split("\n")
-          .filter(Boolean)
-          .map((line) => {
-            const at = line.indexOf("=");
-            return [line.slice(0, at), line.slice(at + 1)];
-          }),
-      );
-
-    await server.call("codex_verify", { prompt: "x", target_dir: ws.gitDir });
-    const argv = argvOf(ws.argvFile);
-    const workspace = argv[argv.indexOf("-C") + 1];
-    const env = readEnv();
-    const sharedCache = join(ws.runsDir, ".cache");
-
-    // run ごとに cache を作り直すと毎回ダウンロードが走り、1 run 数百 MB まで膨らむ
-    assert.ok(env.UV_CACHE_DIR?.startsWith(sharedCache), env.UV_CACHE_DIR);
-    assert.ok(env.XDG_CACHE_HOME?.startsWith(sharedCache), env.XDG_CACHE_HOME);
-    assert.ok(!env.UV_CACHE_DIR?.startsWith(workspace), "cache が run ごとになっている");
-    // 一時領域は run ごとに分ける（成果物と混ざらないように）
-    assert.ok(env.TMPDIR?.startsWith(workspace), env.TMPDIR);
-    // 共有 cache は cwd の外なので、書き込み許可を明示しないと使えない
-    const rootsArg = argv.find((a) => a.startsWith("sandbox_workspace_write.writable_roots="));
-    assert.ok(rootsArg, argv.join(" "));
-    assert.ok(rootsArg.includes(sharedCache), rootsArg);
-
-    assert.equal(env.PYTHONDONTWRITEBYTECODE, "1");
-    assert.match(env.PYTEST_ADDOPTS ?? "", /no:cacheprovider/);
-
-    // 2 本目も同じ cache を指す（共有されている）
-    await server.call("codex_verify", { prompt: "y", target_dir: ws.gitDir });
-    assert.equal(readEnv().UV_CACHE_DIR, env.UV_CACHE_DIR);
-  });
-
-  it("実行環境の説明を prompt に添える", async () => {
-    await server.call("codex_verify", { prompt: "テストして", target_dir: ws.gitDir });
-    const sent = read(ws.stdinFile, "utf8");
-    assert.match(sent, /^テストして/);
-    assert.match(sent, /検証対象（読み取り専用）/);
-    assert.match(sent, new RegExp(ws.gitDir));
-    assert.match(sent, /検証対象には書き込めません/);
-  });
-
-  it("target_dir は必須で、cwd は受け付けない", async () => {
-    const missing = await server.call("codex_verify", { prompt: "x" });
-    assert.equal(missing.result.isError, true);
-    assert.match(textOf(missing.result), /target_dir は必須/);
-
-    const withCwd = await server.call("codex_verify", {
-      prompt: "x",
-      target_dir: ws.gitDir,
-      cwd: ws.gitDir,
-    });
-    assert.equal(withCwd.result.isError, true);
-    assert.match(textOf(withCwd.result), /未知の引数です: cwd/);
-  });
-
-  it("git 管理外でも検証できる（読むだけなので）", async () => {
-    const res = await server.call("codex_verify", { prompt: "x", target_dir: ws.plainDir });
-    assert.equal(res.result.isError, undefined, textOf(res.result));
-  });
-});
-
-describe("codex_verify のプロジェクト規則", () => {
-  let ws;
-  let server;
-
-  before(() => {
-    ws = makeWorkspace("projectdoc");
-    server = startServer(ws.env());
-  });
-  after(() => {
-    server.close();
-    rmSync(ws.root, { recursive: true, force: true });
-  });
-
-  it("対象の AGENTS.md を作業ディレクトリへ持ち込む", async () => {
-    // codex は cwd から project doc を探す。verify は cwd が使い捨ての workspace なので、
-    // 持ち込まないと対象プロジェクトの規則（「pytest は uv run で」等）が届かない。
-    writeFileSync(join(ws.gitDir, "AGENTS.md"), "# 規則\nテストは `uv run pytest` で実行する。\n");
-
-    const res = await server.call("codex_verify", { prompt: "テストして", target_dir: ws.gitDir });
-    assert.equal(res.result.isError, undefined, textOf(res.result));
-
-    const runId = runIdOf(textOf(res.result));
-    const copied = join(ws.runsDir, runId, "workspace", "AGENTS.md");
-    assert.ok(existsSync(copied), "AGENTS.md が持ち込まれていない");
-    assert.match(read(copied, "utf8"), /uv run pytest/);
-
-    const meta = JSON.parse(read(join(ws.runsDir, runId, "meta.json"), "utf8"));
-    assert.equal(meta.project_doc, join(ws.gitDir, "AGENTS.md"));
-  });
-
-  it("対象に AGENTS.md が無ければ何もしない", async () => {
-    const res = await server.call("codex_verify", { prompt: "x", target_dir: ws.plainDir });
-    assert.equal(res.result.isError, undefined, textOf(res.result));
-    const runId = runIdOf(textOf(res.result));
-    assert.ok(!existsSync(join(ws.runsDir, runId, "workspace", "AGENTS.md")));
-    const meta = JSON.parse(read(join(ws.runsDir, runId, "meta.json"), "utf8"));
-    assert.equal(meta.project_doc, null);
   });
 });

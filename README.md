@@ -5,20 +5,20 @@ Claude Code / Codex CLI で使う道具の置き場。スキルと MCP サーバ
 | 種類 | 名前 | 内容 |
 |---|---|---|
 | スキル | `consulting-slides` | 経営層向けの戦略コンサルティング資料を HTML スライド（16:9）で作成する。24種の図解パターン、ヘッドレス Chrome による全ページ画像検証つき。求められたときだけ PPTX にも変換できる |
-| MCP サーバ | `mcp-servers/codex-exec` | Codex CLI を MCP の tool として Claude Code へ公開する。相談・検証・実装を委譲でき、長時間の run は切り離して後から結果を取れる |
+| MCP サーバ | `mcp-servers/codex-exec` | Codex CLI を MCP の tool として Claude Code へ公開する。相談と実装を委譲でき、長時間の run は切り離して後から結果を取れる |
 
 ## セットアップ（各端末で1回）
 
 ```bash
-git clone git@github.com:KosukeShiraki/agent-tools.git ~/agent-tools
+git clone git@github.com:KosukeShiraki/agent-tools.git ~/projects/agent-tools
 ```
 
 ### スキル
 
 ```bash
 mkdir -p ~/.claude/skills ~/.codex/skills
-ln -s ~/agent-tools/consulting-slides ~/.claude/skills/consulting-slides   # Claude Code
-ln -s ~/agent-tools/consulting-slides ~/.codex/skills/consulting-slides    # Codex CLI
+ln -s ~/projects/agent-tools/consulting-slides ~/.claude/skills/consulting-slides   # Claude Code
+ln -s ~/projects/agent-tools/consulting-slides ~/.codex/skills/consulting-slides    # Codex CLI
 ```
 
 ### MCP サーバ（codex-exec）
@@ -27,7 +27,7 @@ ln -s ~/agent-tools/consulting-slides ~/.codex/skills/consulting-slides    # Cod
 `npm install` は要らない（Node 標準モジュールのみで動く）。
 
 ```bash
-claude mcp add codex -s user -- node ~/agent-tools/mcp-servers/codex-exec/server.mjs
+claude mcp add codex -s user -- node ~/projects/agent-tools/mcp-servers/codex-exec/server.mjs
 claude mcp list   # ✔ Connected を確認
 ```
 
@@ -50,7 +50,7 @@ claude mcp list   # ✔ Connected を確認
 ## 更新
 
 ```bash
-cd ~/agent-tools && git pull
+cd ~/projects/agent-tools && git pull
 ```
 
 MCP サーバのコードを更新した場合、**動いているサーバプロセスには反映されない**
@@ -60,7 +60,10 @@ MCP サーバのコードを更新した場合、**動いているサーバプ�
 ## テスト
 
 ```bash
-cd ~/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs test/runs.test.mjs
+cd ~/projects/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs test/runs.test.mjs
 ```
 
-実 Codex は呼ばず、ダミーに差し替えて 91 件を検証する。
+実 Codex は呼ばず、ダミーに差し替えて 83 件を検証する。
+
+**Windows では走らない**（ダミーが shebang 付きの `.sh` で、Windows は実行できない）。
+WSL / Linux / macOS で実行すること。

@@ -162,7 +162,6 @@ export function makeWorkspace(prefix) {
     runsDir,
     argvFile: join(root, "argv.txt"),
     stdinFile: join(root, "stdin.txt"),
-    envFile: join(root, "env.txt"),
     pwdFile: join(root, "pwd.txt"),
     env(extra = {}) {
       return {
@@ -170,7 +169,6 @@ export function makeWorkspace(prefix) {
         CODEX_MCP_RUNS_DIR: runsDir,
         CODEX_FAKE_ARGV_FILE: join(root, "argv.txt"),
         CODEX_FAKE_STDIN_FILE: join(root, "stdin.txt"),
-        CODEX_FAKE_ENV_FILE: join(root, "env.txt"),
         CODEX_FAKE_PWD_FILE: join(root, "pwd.txt"),
         ...extra,
       };

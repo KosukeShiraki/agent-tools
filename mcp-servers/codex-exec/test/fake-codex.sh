@@ -16,10 +16,6 @@ set -u
 : "${CODEX_FAKE_STDIN_FILE:=/dev/null}"
 : "${CODEX_FAKE_THREAD_ID:=01a09c85-9969-7611-97f2-0d00bf50a7f9}"
 printf '%s\n' "$@" > "$CODEX_FAKE_ARGV_FILE"
-if [ -n "${CODEX_FAKE_ENV_FILE:-}" ]; then
-  env | grep -E '^(UV_CACHE_DIR|XDG_CACHE_HOME|TMPDIR|PYTHONDONTWRITEBYTECODE|PYTEST_ADDOPTS)=' \
-    > "$CODEX_FAKE_ENV_FILE" || true
-fi
 printf '%s\n' "$PWD" > "${CODEX_FAKE_PWD_FILE:-/dev/null}"
 cat > "$CODEX_FAKE_STDIN_FILE"
 

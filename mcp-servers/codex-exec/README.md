@@ -17,7 +17,6 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 | tool | 役割 |
 |---|---|
 | `codex_consult` | read-only で相談する。調査・レビュー・設計相談 |
-| `codex_verify` | 対象は読めるが書けない状態で検証させる。**テストの再実行ができる** |
 | `codex_apply` | workspace-write で作業させる。git 管理下のみ |
 | `codex_status` | 切り離した run の進捗を見る |
 | `codex_result` | 切り離した run の報告を取る |
@@ -29,8 +28,6 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 |---|---|---|
 | `prompt` | ✓ | Codex への指示 |
 | `cwd` | `codex_apply` のみ | 作業ディレクトリ（絶対パス）。symlink と `..` は実体へ正規化する |
-| `model` | | モデル slug。省略時は既定（下表） |
-| `reasoning_effort` | | `low` / `medium` / `high` / `xhigh` / `max` / `ultra` |
 | `timeout_ms` | | **同期で待つ上限**（既定 600000 = 10分、上限 1500000 = 25分）。待ち行列と実行待ちの合計がこれを超えない（`kill_on_timeout: true` のときは打ち切り待ちが最大 10 秒加わる）。超えても codex は止めない |
 | `delegate` | | codex がサブエージェントへ委譲し独立レビューまで自走することを許すか。既定は tool ごと（下記） |
 | `resume_session_id` | | 前回の `session_id`。会話を継続する |
@@ -41,68 +38,53 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 状態を保つため。判定は `git rev-parse --show-toplevel` で行う（`.git` の存在だけを見ると、
 空の `.git` ディレクトリ——実際に `/tmp` にあった——を誤ってリポジトリと見なす）。
 
-### 既定のモデルと effort
+### モデルと effort は利用者だけが決める
 
-| tool | 既定モデル | 既定 effort |
+| tool | モデル | effort |
 |---|---|---|
 | `codex_consult` | `gpt-6-astra` | `xhigh` |
-| `codex_verify` | `gpt-6-astra` | `low` |
 | `codex_apply` | `gpt-5.6-luna` | `max` |
 
-- コードを書くのは `codex_apply` だけなので、そこだけ別のモデルを既定にしている。
-  検証を別系統のモデル（astra）に任せることで、書いたモデルと同じ癖で見落とすのを避ける。
-- `codex_verify` はテストを走らせて結果を持ち帰るのが主な仕事なので、モデルの能力は
-  据え置きで effort だけ低くしている（深い推論は効きにくく、時間と費用だけ増える）。
+コードを書くのは `codex_apply` だけなので、そこだけ別のモデルにしている。レビューを
+別系統のモデル（astra）に任せることで、書いたモデルと同じ癖で見落とすのを避ける。
 
-明示指定が既定より優先される。既定の effort がそのモデルで非対応の場合は押し付けず、
-Codex 側の既定に委ねる。
+**`model` と `reasoning_effort` は tool の引数ではない。** 変えられるのは環境変数
+（下記）だけで、呼び出し側の LLM からは指定できない（渡すと「未知の引数です」で弾く）。
 
-## codex_verify（検証モード）
+そうしたのは、**呼び出し側が既定を無視するのを実測したため**である。保持していた 25 run
+すべてが `gpt-6-astra` で、`codex_apply` の既定 `gpt-5.6-luna` は一度も発動していなかった
+（呼び出し側が毎回 `model` を明示していた）。effort も 4 run で勝手に下げられていた。
+どのモデルにいくら払うかは利用者が決めることなので、入口を環境変数だけにする。
 
-`codex_consult` は `-s read-only` なので、**テストを実行しようとすると uv や pytest が
-キャッシュを書けずに失敗する**。「テストは通っているという前提でコードを読む」しかなく、
-レビューの独立性が落ちる。かといって `codex_apply` では対象を書き換えられてしまう。
+既定の effort がそのモデルで非対応の場合は押し付けず、Codex 側の既定に委ねる。判定は
+**起動時**に行い（呼び出し側から渡せない以上、実行時に弾いても直す手段が無い）、
+落とした場合は stderr に warning を出す。
 
-その中間として `codex_verify` がある:
+## テストを誰が走らせるか（`codex_verify` を廃した理由）
 
-- 書けるのは `runs/<run_id>/workspace/`（run ごとの使い捨て）**だけ**
-- `target_dir` は**読めるが書けない**。サンドボックスが拒否する
-- Python のキャッシュ類は環境変数で作業ディレクトリへ向けてある
-  （`UV_CACHE_DIR` / `XDG_CACHE_HOME` / `TMPDIR` / `PYTHONDONTWRITEBYTECODE` /
-  `PYTEST_ADDOPTS=-p no:cacheprovider`）
+4.0.0 まで `codex_verify` があった。対象を読めるが書けないサンドボックスでテストを
+走らせる tool で、「実装者の自己申告を信じない」ための独立した検証役だった。
 
-### 仕組みと、実測して分かったこと
+**保持していた 25 run で一度も使われなかった**（`codex_apply` 13 / `codex_consult` 12 /
+`codex_verify` 0）。振り返ると、この tool には 3 つ問題があった:
 
-`-s workspace-write` は「cwd 配下だけ書ける」ではない。**既定では `/tmp` と `$TMPDIR` も
-書ける**ので、cwd を一時ディレクトリにしただけでは隔離にならない（`/tmp` 配下に置いた
-repo へ書けてしまうことを実測で確認した）。そこで次の 2 つを付ける:
+1. **出自が役割ではなく技術的制約だった。** `read-only` では uv や pytest がキャッシュを
+   書けずテストが落ちる、という回避策として生まれた。「独立した検証役が要る」という
+   要請から設計したわけではない。
+2. **「実行するだけ」なら呼び出し側の Bash が圧倒的に安い。** 同じマシンで動く以上、
+   できることは変わらない。model 1 run（数分 + 枠）を使う理由が無い。
+3. **自己申告の検証は、すでに git 差分が担っていた。** テストを緩める・xfail を付ける
+   といった改変は、`codex_apply` が応答に添える変更ファイル一覧と `diff --stat` に出る。
 
-```
--c sandbox_workspace_write.exclude_slash_tmp=true
--c sandbox_workspace_write.exclude_tmpdir_env_var=true
-```
+代わりに `codex_apply` は、prompt の末尾で**テストの実行と申告**を求める:
 
-これで実測した挙動:
+> 変更後はプロジェクト規則に従ってテストを実行し、実行したコマンドと結果（件数・
+> 失敗の有無）を報告に含めてください。実行しなかった場合は、その理由を報告に明記して
+> ください。
 
-| 操作 | 結果 |
-|---|---|
-| cwd の外（対象 repo）を読む | できる |
-| cwd の外（対象 repo）に書く | **できない** |
-| cwd（使い捨て作業ディレクトリ）に書く | できる |
-
-実運用での確認（対象 = このリポジトリとは別の実プロジェクト）:
-
-```
-1. uv run pytest ... → 57 passed in 3.37s     ← テストが走る
-2. touch <target>/PROBE.txt → false            ← 書き込みは拒否される
-3. touch ./scratch.txt → true                  ← 作業ディレクトリには書ける
-```
-
-実行後、対象リポジトリは汚れていないことを `git status` で確認した。
-
-なお `codex exec --worktree` も試したが（`--enable worktrees` が要る。worktree は
-`~/.codex/worktrees/<hash>/<repo>` に detached HEAD で作られる）、**未コミットの変更が
-持ち込まれない**ため、レビュー対象が「今の差分」であるこの用途には合わない。
+実行したコマンドを書かせるのが肝で、呼び出し側は同じコマンドを 1 回打つだけで裏取り
+できる。`scope: "open"` でも外れない（範囲の指示とは別の話なので）。`codex_consult` には
+添えない——read-only ではそもそも走らないため。
 
 ## クライアント側のタイムアウト
 
@@ -155,9 +137,8 @@ codex は内部でサブエージェントへ委譲し、独立レビューま�
 |---|---|---|
 | `codex_consult` | `false` | レビューは呼び出し側が回すので、内部で自走させない |
 | `codex_apply` | `false` | 実装は自分で進めてもらう |
-| `codex_verify` | `false` | テストを走らせるだけなので委譲は要らない |
 
-3 つとも既定で委譲しない。委譲させたいときだけ `delegate: true` を渡す。
+どちらも既定で委譲しない。委譲させたいときだけ `delegate: true` を渡す。
 
 なお `multi_agent_version` はモデルごとに違う（astra は v2 かつ
 `multi_agent_reasoning_effort=xhigh`、luna は v1、gpt-5.5 は無し）。
@@ -167,11 +148,10 @@ codex は内部でサブエージェントへ委譲し、独立レビューま�
 **codex は `CLAUDE.md` を読まない。** 読むのは `AGENTS.md`（とグローバルの
 `~/.codex/AGENTS.md`）。sandbox で見えていないのではなく、探すファイル名が違う。
 
-**codex は cwd から project doc を探す。** `codex_verify` は cwd が使い捨ての workspace
-なので、そのままだと対象プロジェクトの規則が届かない（実測で確認: `codex_consult` は
-対象の AGENTS.md を読めたが、`codex_verify` は読めていなかった）。「テストは
-`uv run pytest` で」といった規則を知らずに間違ったコマンドを打つので、**対象の
-`AGENTS.md` を workspace へコピーして持ち込んでいる**。
+**codex は cwd から project doc を探す。** `codex_consult` / `codex_apply` はどちらも
+cwd が対象ディレクトリなので、対象の `AGENTS.md` はそのまま届く（実測で確認）。
+`codex_verify` は cwd が使い捨ての workspace だったためこれが届かず、対象の `AGENTS.md`
+をコピーして持ち込んでいたが、tool ごと廃したのでその仕掛けも無くなった。
 
 `CLAUDE.md` が `AGENTS.md` への symlink になっているリポジトリでは同じ内容なので実害は
 ないが、別ファイルとして内容が乖離していると、codex と Claude Code が別々の規則に従う。
@@ -280,12 +260,12 @@ codex がそのファイルを追加編集した場合に消えてしまう（ru
 > 修正せず、報告に「範囲外の気づき」として記載してください。
 
 「抽出だけ」と指示したのに周辺を直され差し戻しになった事例があったため。`scope: "open"`
-で外せる。
+で外せる。テストの実行を求める指示（上記）は `scope` とは別系統なので、`open` でも残る。
 
 ## 登録
 
 ```bash
-claude mcp add codex -s user -- node ~/agent-tools/mcp-servers/codex-exec/server.mjs
+claude mcp add codex -s user -- node ~/projects/agent-tools/mcp-servers/codex-exec/server.mjs
 claude mcp list   # ✔ Connected を確認
 ```
 
@@ -295,11 +275,18 @@ claude mcp list   # ✔ Connected を確認
 ## テスト
 
 ```bash
-cd ~/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs test/runs.test.mjs
+cd ~/projects/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs test/runs.test.mjs
 ```
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
+83 件。
+
+**Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
+実行できない（`spawn EFTYPE`）。spawn を伴わない検証は通るが、それ以外は全滅する。
+WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Windows で clone すると
+`.sh` が CRLF になり、WSL 側でも `/usr/bin/env: 'bash\r'` で落ちる。repo 直下の
+`.gitattributes` が `*.sh text eol=lf` で固定している。
 
 **ダミーは引数を検証しない**ので、`codex exec resume` に `--color` を渡していた不具合は
 テストを通過し、実 codex で初めて露見した。resume に渡すオプションは許可リストで
@@ -315,7 +302,7 @@ cd ~/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs te
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 3.7.0
+現在: 4.0.0
 ```
 
 | version | 変更 |
@@ -330,6 +317,8 @@ cd ~/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs te
 | 3.5.0 | `codex_verify` が対象の AGENTS.md を workspace へ持ち込むよう修正 |
 | 3.6.0 | `delegate: false` の指示文で、AGENTS.md の委譲指示との競合を明示的に解く |
 | 3.7.0 | `codex_consult` の `delegate` も既定 false に（3 ツールとも委譲しない） |
+| 3.8.0 / 3.9.0 | （記録漏れ。コードは 3.9.0 だったが、この表は 3.7.0 で止まっていた） |
+| 4.0.0 | `codex_verify` を削除。`model` / `reasoning_effort` を tool 引数から外し、環境変数のみに。`codex_apply` にテスト実行と申告の指示を追加 |
 
 ## 環境変数
 
@@ -338,22 +327,24 @@ cd ~/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs te
 | `CODEX_BIN` | `codex` | codex 実行ファイル |
 | `CODEX_HOME` | `~/.codex` | `models_cache.json` の探索先 |
 | `CODEX_MCP_RUNS_DIR` | `~/.claude/codex-exec/runs` | run の記録先（clone の外に置く） |
-| `CODEX_MCP_CONSULT_MODEL` | `gpt-6-astra` | `codex_consult` の既定モデル |
-| `CODEX_MCP_CONSULT_EFFORT` | `xhigh` | `codex_consult` の既定 effort |
-| `CODEX_MCP_APPLY_MODEL` | `gpt-5.6-luna` | `codex_apply` の既定モデル |
-| `CODEX_MCP_APPLY_EFFORT` | `max` | `codex_apply` の既定 effort |
-| `CODEX_MCP_VERIFY_MODEL` | `gpt-6-astra` | `codex_verify` の既定モデル |
-| `CODEX_MCP_VERIFY_EFFORT` | `low` | `codex_verify` の既定 effort |
+| `CODEX_MCP_CONSULT_MODEL` | `gpt-6-astra` | `codex_consult` のモデル |
+| `CODEX_MCP_CONSULT_EFFORT` | `xhigh` | `codex_consult` の effort |
+| `CODEX_MCP_APPLY_MODEL` | `gpt-5.6-luna` | `codex_apply` のモデル |
+| `CODEX_MCP_APPLY_EFFORT` | `max` | `codex_apply` の effort |
 | `CODEX_MCP_MAX_CONCURRENCY` | `3` | 同時に走らせる codex の本数 |
 | `CODEX_MCP_MAX_RUNS` | `50` | 保持する run の件数 |
-| `CODEX_MCP_WORKSPACE_TTL_MS` | `86400000` | 完了から この時間で codex_verify の workspace を捨てる（24時間） |
-| `CODEX_MCP_MAX_CACHE_BYTES` | `3221225472` | 共有 cache の上限（3GB）。超えたら捨てて作り直す |
 | `CODEX_MCP_PRUNE_GRACE_MS` | `120000` | 完了直後の run を保護する時間 |
 | `CODEX_MCP_PRUNE_DELAY_MS` | `10000` | run 完了から prune までの遅延 |
 | `CODEX_MCP_HARD_LIMIT_MS` | `7200000` | 1 run の絶対上限（2時間）。超えたら強制的に打ち切る |
 
 モデル / effort の環境変数に**空文字**を渡すと「既定なし」になり、`~/.codex/config.toml`
-に委ねる。
+に委ねる。**モデルと effort を変えられるのはここだけ**なので、登録時に指定する:
+
+```bash
+claude mcp add codex -s user \
+  -e CODEX_MCP_APPLY_MODEL=gpt-6-astra \
+  -- node ~/projects/agent-tools/mcp-servers/codex-exec/server.mjs
+```
 
 ## 設計上の注意
 
@@ -404,10 +395,7 @@ cd ~/agent-tools/mcp-servers/codex-exec && node --test test/protocol.test.mjs te
 - **同時実行**: 既定 3 本。切り離した run もスロットを保持する（codex は走り続けている
   ため）。空きを `timeout_ms` 待っても取れなければエラーを返す。
 - **同じ repo での並行 apply**: 拒否する。同時に走らせると互いの変更を奪い合ううえ、
-  git 差分がどちらのものか分からなくなる。`codex_consult` / `codex_verify` は読むだけ
-  なので並行して使える。
-- **検証モードの作業ディレクトリ**: `runs/<run_id>/workspace/` に残る（テスト成果物や
-  キャッシュを含む）。run の prune と一緒に消える。
+  git 差分がどちらのものか分からなくなる。`codex_consult` は読むだけなので並行して使える。
 - **stdout の純度**: MCP の stdout は JSON-RPC 専用。ログは必ず stderr へ出すこと
   （テストが全 stdout 行を JSON-RPC としてパースできることを検証している）。
   `git` の呼び出しも `stdio: [ignore, pipe, ignore]` で stderr を捨てている。

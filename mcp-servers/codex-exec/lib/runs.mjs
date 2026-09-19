@@ -15,7 +15,6 @@ import {
   readdirSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -42,22 +41,6 @@ const PRUNE_GRACE_MS = Math.max(
 );
 // 報告本文の 1 件あたりの上限。events.jsonl とは別に残す。
 const MAX_MESSAGE_CHARS = 256 * 1024;
-// codex_verify の workspace は test 成果物で重くなる（実測で 1 run 170MB）。
-// 記録（meta / events / messages）は軽いので残し、workspace だけ先に落とす。
-const WORKSPACE_TTL_MS = Math.max(
-  0,
-  Number.parseInt(process.env.CODEX_MCP_WORKSPACE_TTL_MS ?? "", 10) || 24 * 60 * 60 * 1000,
-);
-// run をまたいで共有する cache の上限。超えたら捨てる（次の run で作り直される）。
-const MAX_CACHE_BYTES = Math.max(
-  0,
-  Number.parseInt(process.env.CODEX_MCP_MAX_CACHE_BYTES ?? "", 10) || 3 * 1024 * 1024 * 1024,
-);
-// cache のサイズ測定は file 数が多いと重いので、間隔をあける。
-const CACHE_CHECK_INTERVAL_MS = Math.max(
-  0,
-  Number.parseInt(process.env.CODEX_MCP_CACHE_CHECK_INTERVAL_MS ?? "", 10) || 60 * 60 * 1000,
-);
 
 // run_id は path の一部になるので、生成形式そのものを検証してから使う。
 // ミリ秒まで入れる。listRunIds は名前順に並べるので、ここが粗いと同一秒内の
@@ -267,59 +250,6 @@ export function listRunIds() {
   }
 }
 
-// ディレクトリの合計サイズ。上限を超えた時点で打ち切る（全部数えなくても判定できる）。
-function directorySize(dir, limit) {
-  let total = 0;
-  const stack = [dir];
-  while (stack.length > 0) {
-    const current = stack.pop();
-    let entries;
-    try {
-      entries = readdirSync(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const full = join(current, entry.name);
-      if (entry.isDirectory()) {
-        stack.push(full);
-        continue;
-      }
-      try {
-        total += statSync(full).size;
-      } catch (err) {
-        // 測っている間に消えたのは想定内。それ以外まで握り潰すと、import 漏れのような
-        // 不具合が「サイズ 0」として表に出ないまま回収を止めてしまう。
-        if (err?.code !== "ENOENT") {
-          process.stderr.write(`warning: サイズ測定に失敗しました (${full}): ${err}\n`);
-        }
-      }
-      if (total > limit) return total;
-    }
-  }
-  return total;
-}
-
-let lastCacheCheck = 0;
-
-// 共有 cache が膨らみすぎたら丸ごと捨てる。中身は再取得できるものだけなので、
-// 消しても壊れない（次の run で作り直される）。
-export function pruneSharedCache(force = false) {
-  const now = Date.now();
-  if (!force && now - lastCacheCheck < CACHE_CHECK_INTERVAL_MS) return 0;
-  lastCacheCheck = now;
-  const dir = join(RUNS_ROOT, ".cache");
-  if (!existsSync(dir)) return 0;
-  const bytes = directorySize(dir, MAX_CACHE_BYTES);
-  if (bytes <= MAX_CACHE_BYTES) return 0;
-  try {
-    rmSync(dir, { recursive: true, force: true });
-  } catch {
-    return 0;
-  }
-  return bytes;
-}
-
 // 古い run を捨てる。実際に動いているものは消さない。
 // `isRunning` は「meta が running のとき、本当に動いているか」を判定する関数
 // （プロセスの生死判定は lib/codex.mjs 側にあるので注入してもらう）。
@@ -343,14 +273,6 @@ export function pruneRuns(isRunning = () => true) {
     if (Number.isFinite(finishedAt) && now - finishedAt < PRUNE_GRACE_MS) {
       kept += 1;
       continue;
-    }
-    // 記録より先に workspace を落とす。報告は残したいが、test 成果物は残さなくてよい。
-    if (Number.isFinite(finishedAt) && now - finishedAt > WORKSPACE_TTL_MS) {
-      try {
-        rmSync(join(RUNS_ROOT, runId, "workspace"), { recursive: true, force: true });
-      } catch {
-        /* 消せなければ次回に持ち越す */
-      }
     }
     const startedAt = meta.started_at ? Date.parse(meta.started_at) : Number.NaN;
     const tooOld = Number.isFinite(startedAt) && now - startedAt > MAX_RUN_AGE_MS;

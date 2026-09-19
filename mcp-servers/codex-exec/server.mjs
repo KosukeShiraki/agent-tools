@@ -8,9 +8,6 @@
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -37,19 +34,16 @@ import {
   listRunIds,
   lookupSession,
   pruneRuns,
-  pruneSharedCache,
   readArtifact,
   readEvents,
   readMessages,
   readMeta,
-  RUNS_ROOT,
   runDir,
   updateMeta,
-  writeArtifact,
 } from "./lib/runs.mjs";
 
 const SERVER_NAME = "codex-exec";
-const SERVER_VERSION = "3.9.0";
+const SERVER_VERSION = "4.0.0";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 // 反射してよいのはサポートしている版だけ。未知の版には自分の版を返す。
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -74,18 +68,6 @@ const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
 const SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// 範囲逸脱を抑えるための定型文。実運用で「抽出だけ」と指示したのに周辺を直され、
-// 差し戻しになった事例があったため、apply では既定でこれを添える。
-const VERIFY_NOTE = (workspace, targetDir) =>
-  "\n\n---\n【実行環境】\n" +
-  `- 作業ディレクトリ（書き込み可）: ${workspace}\n` +
-  `- 検証対象（読み取り専用）: ${targetDir}\n` +
-  "検証対象には書き込めません（サンドボックスが拒否します）。生成物・一時ファイル・" +
-  "メモは作業ディレクトリに置いてください。テストは検証対象へ cd して実行して構いません。\n" +
-  "作業ディレクトリの AGENTS.md は検証対象からコピーしたものです（対象のプロジェクト規則）。\n" +
-  "Python のキャッシュ類は環境変数で作業ディレクトリへ向けてあります" +
-  "（UV_CACHE_DIR / XDG_CACHE_HOME / TMPDIR / PYTHONDONTWRITEBYTECODE / PYTEST_ADDOPTS）。";
-
 // codex は内部でサブエージェントへ委譲し、独立レビューまで自走することがある
 // （実運用で 1 run 80 分超、経過の大半が collab_tool_call）。呼び出し側が別途レビューを
 // 回していると二重になる。設定では止められなかった（--disable multi_agent /
@@ -103,6 +85,14 @@ const SOLO_NOTE =
 const SCOPE_NOTE =
   "\n\n---\n【作業範囲について】指示された範囲のみを変更してください。" +
   "範囲外で問題や弱点を見つけた場合は、その場で修正せず、報告に「範囲外の気づき」として記載してください。";
+
+// 検証専用ツールを廃したぶん、実装者にテスト実行と申告を求める。実行したコマンドを
+// 書かせるのが肝で、呼び出し側は同じコマンドを 1 回打つだけで裏取りできる。
+// （テストファイル自体を緩める改変は、応答に付く git 差分に出る）
+const TEST_NOTE =
+  "\n\n---\n【テストについて】変更後はプロジェクト規則に従ってテストを実行し、" +
+  "実行したコマンドと結果（件数・失敗の有無）を報告に含めてください。" +
+  "実行しなかった場合は、その理由を報告に明記してください。";
 
 // 環境変数での上書き。未設定なら fallback、空文字なら「既定なし」
 //（= codex 側の config.toml に委ねる）を意味する。
@@ -133,37 +123,21 @@ const TOOL_MODES = {
     defaultModel: envDefault(process.env.CODEX_MCP_APPLY_MODEL, "gpt-5.6-luna"),
     defaultEffort: envDefault(process.env.CODEX_MCP_APPLY_EFFORT, "max"),
   },
-  // 検証専用。書けるのは使い捨ての作業ディレクトリだけで、対象 repo は読めるが書けない。
-  // read-only だとテストが「キャッシュを書けない」で落ちるため、この中間モードを用意する。
-  codex_verify: {
-    sandbox: "workspace-write",
-    skipGitRepoCheck: true,
-    cwdRequired: false,
-    scopeNote: false,
-    isolated: true,
-    defaultDelegate: false, // テストを走らせるだけなので委譲は要らない
-    defaultModel: envDefault(process.env.CODEX_MCP_VERIFY_MODEL, "gpt-6-astra"),
-    // テストを走らせて結果を持ち帰るのが主な仕事なので、推論の深さは要らない。
-    defaultEffort: envDefault(process.env.CODEX_MCP_VERIFY_EFFORT, "low"),
-  },
 };
 
+// model / reasoning_effort は意図的に含めない。呼び出し側の LLM に選ばせると、
+// 実運用では既定を無視して毎回同じモデルを指定してきた（25 run すべて gpt-6-astra。
+// codex_apply の既定 gpt-5.6-luna は一度も発動しなかった）。どのモデルにいくら払うかは
+// 利用者が決めることなので、環境変数だけを入口にする。
 const RUN_ARG_KEYS = [
   "prompt",
   "cwd",
-  "model",
-  "reasoning_effort",
   "timeout_ms",
   "resume_session_id",
   "kill_on_timeout",
   "delegate",
 ];
 const APPLY_ARG_KEYS = [...RUN_ARG_KEYS, "scope"];
-// codex_verify は cwd をサーバが決めるので、代わりに読み取り対象を受ける。
-const VERIFY_ARG_KEYS = [
-  ...RUN_ARG_KEYS.filter((key) => key !== "cwd"),
-  "target_dir",
-];
 
 // ---------------------------------------------------------------- codex 設定の参照
 
@@ -195,14 +169,26 @@ function loadKnownModels() {
   }
 }
 
-// 既定値の健全性を起動時に見る。effort は閉じた集合なので不正なら捨てる。モデル slug は
-// 開いた集合（キャッシュが古いこともある）なので、警告だけ出してそのまま使う。
+// モデルと effort は呼び出し側から渡せないので、不正な設定に気づける唯一の機会が
+// 起動時になる。effort は閉じた集合なので、不正な値とモデル非対応の値はここで捨てる
+// （以前は実行時に呼び出し側へエラーを返していたが、渡せなくなった以上ここで解決する）。
+// モデル slug は開いた集合（キャッシュが古いこともある）なので、警告だけ出して使う。
 function checkDefaults() {
   const known = loadKnownModels();
   for (const [toolName, mode] of Object.entries(TOOL_MODES)) {
     if (mode.defaultEffort && !REASONING_EFFORTS.includes(mode.defaultEffort)) {
       process.stderr.write(
         `warning: ${toolName} の既定 reasoning_effort が不正なため無視します: ${mode.defaultEffort}\n`,
+      );
+      mode.defaultEffort = undefined;
+    }
+    const entry = findModelEntry(mode.defaultModel, known);
+    if (mode.defaultEffort && !supportsEffort(entry, mode.defaultEffort)) {
+      // 押し付けずに codex 側の既定へ委ねる。ここで落とさないと毎回 run が失敗する。
+      process.stderr.write(
+        `warning: ${toolName} の既定モデル ${mode.defaultModel} は ` +
+          `reasoning_effort=${mode.defaultEffort} に対応していないため無視します` +
+          `（対応値: ${entry.efforts.join(", ")}）\n`,
       );
       mode.defaultEffort = undefined;
     }
@@ -221,37 +207,20 @@ function checkDefaults() {
 
 // ---------------------------------------------------------------- ツール定義
 
-function modelDescription(known, defaultModel) {
-  const base = defaultModel
-    ? `Codex に渡すモデル slug。省略時は ${defaultModel}。`
-    : "Codex に渡すモデル slug。省略時は ~/.codex/config.toml の model 設定に従う。";
-  if (known.length === 0) return base;
-  return `${base} 既知のモデル: ${known.map((m) => m.slug).join(", ")}`;
+// 呼び出し側はモデルを選べないが、「誰に相談しているか」は判断材料になるので明示する。
+function fixedModelNote(mode) {
+  const model = mode.defaultModel ?? "~/.codex/config.toml の設定";
+  const effort = mode.defaultEffort ? `/ effort=${mode.defaultEffort}` : "";
+  return `モデルは ${model} ${effort} に固定されている（呼び出し側からは変更できない）。`;
 }
 
-function effortDescription(defaultEffort) {
-  const base = defaultEffort
-    ? `推論の深さ。省略時は ${defaultEffort}。`
-    : "推論の深さ。省略時は config.toml の model_reasoning_effort に従う。";
-  return `${base} max / ultra は対応モデルのみ。`;
-}
-
-function runProperties(known, mode) {
+function runProperties(mode) {
   return {
     prompt: {
       type: "string",
       description:
         "Codex に渡す指示。resume_session_id を使わない限り会話は継続しないため、" +
         "必要な文脈はこの中に書く。",
-    },
-    model: {
-      type: "string",
-      description: modelDescription(known, mode.defaultModel),
-    },
-    reasoning_effort: {
-      type: "string",
-      enum: REASONING_EFFORTS,
-      description: effortDescription(mode.defaultEffort),
     },
     timeout_ms: {
       type: "integer",
@@ -282,16 +251,15 @@ function runProperties(known, mode) {
 }
 
 function toolDefinitions() {
-  const known = loadKnownModels();
-  const consult = runProperties(known, TOOL_MODES.codex_consult);
-  const apply = runProperties(known, TOOL_MODES.codex_apply);
-  const verify = runProperties(known, TOOL_MODES.codex_verify);
+  const consult = runProperties(TOOL_MODES.codex_consult);
+  const apply = runProperties(TOOL_MODES.codex_apply);
   return [
     {
       name: "codex_consult",
       description:
         "Codex に読み取り専用（-s read-only）で相談する。コード調査・レビュー・設計相談・" +
-        "セカンドオピニオンに使う。Codex はファイルを読めるが一切書き換えない。",
+        "セカンドオピニオンに使う。Codex はファイルを読めるが一切書き換えない。" +
+        `${fixedModelNote(TOOL_MODES.codex_consult)}`,
       inputSchema: {
         type: "object",
         properties: {
@@ -311,7 +279,9 @@ function toolDefinitions() {
       description:
         "Codex に workspace-write で作業させる。cwd 配下のファイルを書き換える。" +
         "変更を戻せるようにするため cwd は git 管理下である必要がある。" +
-        "応答には変更ファイル一覧と diff --stat が付く。",
+        "応答には変更ファイル一覧と diff --stat が付く。" +
+        "既定では「テストを実行し、コマンドと結果を報告に含める」よう指示する。" +
+        `${fixedModelNote(TOOL_MODES.codex_apply)}`,
       inputSchema: {
         type: "object",
         properties: {
@@ -330,27 +300,6 @@ function toolDefinitions() {
           },
         },
         required: ["prompt", "cwd"],
-        additionalProperties: false,
-      },
-    },
-    {
-      name: "codex_verify",
-      description:
-        "Codex に検証させる（テストの再実行など）。対象ディレクトリは読めるが" +
-        "**書けない**（サンドボックスが拒否する）。書けるのは run ごとの使い捨て作業" +
-        "ディレクトリだけで、Python のキャッシュ類はそこへ向けてある。" +
-        "read-only ではキャッシュが書けずテストが動かないので、その中間として用意している。" +
-        "レビューで「テストが通っている」を自分で確かめたいときに使う。",
-      inputSchema: {
-        type: "object",
-        properties: {
-          ...verify,
-          target_dir: {
-            type: "string",
-            description: "検証対象の絶対パス（読み取り専用）。必須。",
-          },
-        },
-        required: ["prompt", "target_dir"],
         additionalProperties: false,
       },
     },
@@ -470,14 +419,6 @@ function validateCwd(value, { required }) {
   return toRealDirectory(value);
 }
 
-function validateModel(value) {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new InvalidArguments("model は空でない文字列で指定してください。");
-  }
-  return value;
-}
-
 function findModelEntry(model, known) {
   return model ? known.find((m) => m.slug === model) : undefined;
 }
@@ -487,29 +428,6 @@ function findModelEntry(model, known) {
 function supportsEffort(entry, effort) {
   if (!entry || entry.efforts.length === 0) return true;
   return entry.efforts.includes(effort);
-}
-
-function validateEffort(value, model, known, modelWasExplicit) {
-  if (value === undefined || value === null) return undefined;
-  if (!REASONING_EFFORTS.includes(value)) {
-    throw new InvalidArguments(
-      `reasoning_effort が不正です: ${JSON.stringify(value)}。有効値: ${REASONING_EFFORTS.join(", ")}`,
-    );
-  }
-  const entry = findModelEntry(model, known);
-  if (!supportsEffort(entry, value)) {
-    // 呼び出し側が model を指定していない場合、知らないモデル名で拒否されると意味が通らない。
-    const subject = modelWasExplicit
-      ? `モデル ${model}`
-      : `既定モデル ${model}`;
-    const hint = modelWasExplicit
-      ? ""
-      : "。model を明示するか reasoning_effort を外してください";
-    throw new InvalidArguments(
-      `${subject} は reasoning_effort=${value} に対応していません。対応値: ${entry.efforts.join(", ")}${hint}`,
-    );
-  }
-  return value;
 }
 
 function validateInteger(
@@ -651,7 +569,6 @@ const PRUNE_DELAY_MS = Math.max(
 
 // 保持期間を過ぎた run を捨てる。動いている run と、自分が抱えている run は残す。
 function prune() {
-  pruneSharedCache();
   pruneRuns((meta) => {
     if (getActive(meta.run_id)) return true;
     // スロット待ちなどで、まだ codex を起動していない自分の run
@@ -715,11 +632,12 @@ function startProgressPings(progressToken, record) {
 
 async function handleRun(toolName, params) {
   const mode = TOOL_MODES[toolName];
-  const known = loadKnownModels();
+  // モデルと effort は設定の値をそのまま使う。起動時の checkDefaults で健全性は
+  // 確認済みなので、ここでは検証しない。
+  const model = mode.defaultModel;
+  const effort = mode.defaultEffort;
   let prompt;
   let cwd;
-  let model;
-  let effort;
   let timeoutMs;
   let resumeSessionId;
   let killOnTimeout;
@@ -728,34 +646,9 @@ async function handleRun(toolName, params) {
   let args;
   try {
     args = toArgs(params);
-    validateArgKeys(
-      args,
-      mode.isolated
-        ? VERIFY_ARG_KEYS
-        : mode.scopeNote
-          ? APPLY_ARG_KEYS
-          : RUN_ARG_KEYS,
-    );
+    validateArgKeys(args, mode.scopeNote ? APPLY_ARG_KEYS : RUN_ARG_KEYS);
     prompt = validatePrompt(args.prompt);
-    if (mode.isolated) {
-      // 作業ディレクトリはサーバが用意する。引数で受けるのは読み取り対象。
-      if (args.target_dir === undefined || args.target_dir === null) {
-        throw new InvalidArguments(
-          "target_dir は必須です（検証対象の絶対パス）。",
-        );
-      }
-      cwd = validateCwd(args.target_dir, { required: true });
-    } else {
-      cwd = validateCwd(args.cwd, { required: mode.cwdRequired });
-    }
-    const explicitModel = validateModel(args.model);
-    model = explicitModel ?? mode.defaultModel;
-    effort = validateEffort(
-      args.reasoning_effort,
-      model,
-      known,
-      explicitModel !== undefined,
-    );
+    cwd = validateCwd(args.cwd, { required: mode.cwdRequired });
     timeoutMs = validateInteger(args.timeout_ms, {
       name: "timeout_ms",
       fallback: DEFAULT_TIMEOUT_MS,
@@ -777,14 +670,6 @@ async function handleRun(toolName, params) {
   } catch (err) {
     if (err instanceof InvalidArguments) return errorResult(err.message);
     throw err;
-  }
-
-  // 明示指定が無ければツール既定の effort を当てる。ただしモデルが対応しない値は
-  // 押し付けず Codex 側の既定に委ねる。
-  if (effort === undefined && mode.defaultEffort) {
-    effort = supportsEffort(findModelEntry(model, known), mode.defaultEffort)
-      ? mode.defaultEffort
-      : undefined;
   }
 
   // 書き込みを伴う場合のみ、git 管理下であることを先に確かめる。
@@ -834,6 +719,8 @@ async function handleRun(toolName, params) {
   }
 
   let effectivePrompt = scope === "strict" ? `${prompt}${SCOPE_NOTE}` : prompt;
+  // 書き込みを伴う run だけ、テストの実行と申告を求める（consult は走らせられない）。
+  if (mode.scopeNote) effectivePrompt = `${effectivePrompt}${TEST_NOTE}`;
   if (!delegate) effectivePrompt = `${effectivePrompt}${SOLO_NOTE}`;
   const startedAt = new Date();
   // 差分の比較は書き込みを伴う apply でのみ使う（consult では git を呼ばない）。
@@ -864,49 +751,6 @@ async function handleRun(toolName, params) {
 
   // timeout_ms は「同期で待つ上限」なので、待ち行列と実行待ちで合計してもこれを超えない。
   const deadline = Date.now() + timeoutMs;
-  // 検証モードでは、書ける場所を run 配下の使い捨てディレクトリだけに閉じる。
-  let spawnCwd = cwd;
-  let spawnEnv;
-  let writableRoots;
-  if (mode.isolated) {
-    const workspace = join(runDir(runId), "workspace");
-    const tmp = join(workspace, "tmp");
-    // cache は run をまたいで共有する。run ごとに作り直すと毎回ダウンロードが走って
-    // 遅いうえ、1 run あたり数百 MB まで膨らむ（実測で 170MB × 3 run）。
-    const sharedCache = join(RUNS_ROOT, ".cache");
-    const uvCache = join(sharedCache, "uv");
-    const xdgCache = join(sharedCache, "xdg");
-    for (const dir of [workspace, tmp, sharedCache, uvCache, xdgCache]) {
-      mkdirSync(dir, { recursive: true });
-    }
-    // codex は cwd から project doc（AGENTS.md）を探す。検証モードでは cwd が
-    // 使い捨ての workspace なので、そのままだと対象プロジェクトの規則が届かない
-    //（「pytest は uv run で」といった規則を知らずに間違ったコマンドを打つ）。
-    // 対象の AGENTS.md を workspace へ持ち込む。
-    const projectDoc = join(cwd, "AGENTS.md");
-    let copiedProjectDoc = null;
-    if (existsSync(projectDoc)) {
-      try {
-        copyFileSync(projectDoc, join(workspace, "AGENTS.md"));
-        copiedProjectDoc = projectDoc;
-      } catch {
-        /* 読めなければ諦める（規則が無いだけで検証自体はできる） */
-      }
-    }
-
-    spawnCwd = workspace;
-    writableRoots = [sharedCache];
-    spawnEnv = {
-      UV_CACHE_DIR: uvCache,
-      XDG_CACHE_HOME: xdgCache,
-      TMPDIR: tmp,
-      PYTHONDONTWRITEBYTECODE: "1",
-      PYTEST_ADDOPTS: "-p no:cacheprovider",
-    };
-    effectivePrompt = `${effectivePrompt}${VERIFY_NOTE(workspace, cwd)}`;
-    writeArtifact(runId, "prompt.txt", effectivePrompt);
-    updateMeta(runId, { workspace, target_dir: cwd, project_doc: copiedProjectDoc });
-  }
 
   const gotSlot = await acquireSlot(Math.max(0, deadline - Date.now()));
   if (!gotSlot) {
@@ -933,18 +777,15 @@ async function handleRun(toolName, params) {
       runId,
       args: buildArgs({
         sandbox: mode.sandbox,
-        cwd: spawnCwd,
+        cwd,
         model,
         effort,
         resumeSessionId,
         lastMessagePath: join(runDir(runId), "last-message.txt"),
         skipGitRepoCheck: mode.skipGitRepoCheck,
-        isolated: mode.isolated,
-        writableRoots,
       }),
       prompt: effectivePrompt,
-      cwd: spawnCwd,
-      env: spawnEnv,
+      cwd,
       // detach しても codex は走り続けるので、スロットは run の完了まで保持する。
       onFinish: (finished) => {
         releaseSlot();
@@ -998,8 +839,7 @@ async function handleRun(toolName, params) {
   const header =
     `[${toolName}] run_id=${runId} model=${model ?? "(config 既定)"} ` +
     `effort=${effort ?? "(config 既定)"} sandbox=${mode.sandbox} ` +
-    `${mode.isolated ? `target=${cwd}（読み取り専用） workspace=${spawnCwd}` : `cwd=${cwd}`} ` +
-    `elapsed=${elapsed}s` +
+    `cwd=${cwd} elapsed=${elapsed}s` +
     (sessionId
       ? `\nsession_id=${sessionId}（続きは resume_session_id に渡す）`
       : "") +
@@ -1369,11 +1209,7 @@ function handleRuns(params) {
 
 async function handleToolCall(params) {
   const name = params?.name;
-  if (
-    name === "codex_consult" ||
-    name === "codex_apply" ||
-    name === "codex_verify"
-  ) {
+  if (name === "codex_consult" || name === "codex_apply") {
     return handleRun(name, params);
   }
   if (name === "codex_status") return handleStatus(params);
@@ -1381,7 +1217,7 @@ async function handleToolCall(params) {
   if (name === "codex_runs") return handleRuns(params);
   return errorResult(
     `未知のツールです: ${JSON.stringify(name)}。利用できるのは ` +
-      "codex_consult, codex_apply, codex_verify, codex_status, codex_result, codex_runs です。",
+      "codex_consult, codex_apply, codex_status, codex_result, codex_runs です。",
   );
 }
 
