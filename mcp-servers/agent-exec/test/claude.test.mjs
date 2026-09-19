@@ -11,13 +11,11 @@ import { after, before, describe, it } from "node:test";
 
 import { FAKE_SESSION_ID, argvOf, makeWorkspace, runIdOf, startServer, textOf } from "./helpers.mjs";
 
-// claude 系のモデル名を渡すと、解決器が claude アダプタを選ぶ。
-// backend という引数は存在しない。
-const CLAUDE_ENV = {
-  AGENT_EXEC_CONSULT_MODEL: "opus",
-  AGENT_EXEC_CONSULT_EFFORT: "xhigh",
-  AGENT_EXEC_APPLY_MODEL: "sonnet",
-  AGENT_EXEC_APPLY_EFFORT: "max",
+// claude 系のモデル名を設定すると、解決器が claude アダプタを選ぶ。
+// backend という引数は存在しない。設定は config.json（7.0.0 で環境変数を廃した）。
+const CLAUDE_CONFIG = {
+  consult: { model: "opus", effort: "xhigh" },
+  apply: { model: "sonnet", effort: "max" },
 };
 
 describe("claude バックエンド", () => {
@@ -26,7 +24,8 @@ describe("claude バックエンド", () => {
 
   before(() => {
     ws = makeWorkspace("claude");
-    server = startServer(ws.env(CLAUDE_ENV));
+    ws.writeConfig(CLAUDE_CONFIG);
+    server = startServer(ws.env());
   });
   after(() => {
     server.close();
@@ -132,11 +131,12 @@ describe("claude の異常系", () => {
 
   before(() => {
     ws = makeWorkspace("claude-err");
+    ws.writeConfig(CLAUDE_CONFIG);
   });
   after(() => rmSync(ws.root, { recursive: true, force: true }));
 
   it("result に本文が無くても、途中の報告を返せる", async () => {
-    const server = startServer(ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_NO_RESULT: "1" }));
+    const server = startServer(ws.env({ CLAUDE_FAKE_NO_RESULT: "1" }));
     try {
       const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       assert.equal(res.result.isError, undefined, textOf(res.result));
@@ -148,7 +148,7 @@ describe("claude の異常系", () => {
 
   it("claude 側のエラーを応答に載せる", async () => {
     const server = startServer(
-      ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_ERROR_RESULT: "model not available" }),
+      ws.env({ CLAUDE_FAKE_ERROR_RESULT: "model not available" }),
     );
     try {
       const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
@@ -161,7 +161,7 @@ describe("claude の異常系", () => {
   // 「テストを走らせられなかった」理由。捨てると原因が分からない。
   it("拒否された操作を応答に載せ、直し方を示す", async () => {
     const server = startServer(
-      ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_DENIAL: "node --test" }),
+      ws.env({ CLAUDE_FAKE_DENIAL: "node --test" }),
     );
     try {
       const res = await server.call("apply", { prompt: "テストして", cwd: ws.gitDir });
@@ -178,7 +178,7 @@ describe("claude の異常系", () => {
   // ときだけ「テストを実行できなかった」が消える。
   it("切り離して result で取っても拒否が出る", async () => {
     const server = startServer(
-      ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_DENIAL: "uv run pytest", CLAUDE_FAKE_SLEEP: "4" }),
+      ws.env({ CLAUDE_FAKE_DENIAL: "uv run pytest", CLAUDE_FAKE_SLEEP: "4" }),
     );
     try {
       const first = await server.call(
@@ -203,7 +203,6 @@ describe("claude の異常系", () => {
   it("失敗イベント + exit 0 でも result は失敗として返す", async () => {
     const server = startServer(
       ws.env({
-        ...CLAUDE_ENV,
         CLAUDE_FAKE_ERROR_RESULT: "model not available",
         CLAUDE_FAKE_SLEEP: "4",
       }),
@@ -230,6 +229,7 @@ describe("セッション索引だけで resume できる", () => {
 
   before(() => {
     ws = makeWorkspace("sessionidx");
+    ws.writeConfig(CLAUDE_CONFIG);
   });
   after(() => rmSync(ws.root, { recursive: true, force: true }));
 
@@ -237,7 +237,7 @@ describe("セッション索引だけで resume できる", () => {
   // backend を索引に書いていないと、run が prune された後に codex 扱いへ倒れ、
   // claude のセッションが「別の CLI で作られています」と拒否されていた。
   it("run が消えても claude のセッションと分かる", async () => {
-    const server = startServer(ws.env(CLAUDE_ENV));
+    const server = startServer(ws.env());
     let runId;
     try {
       const res = await server.call("consult", { prompt: "最初", cwd: ws.plainDir });
@@ -253,7 +253,7 @@ describe("セッション索引だけで resume できる", () => {
     // run 本体だけ消す（prune や保持期限で起きる状態を再現する）
     rmSync(join(ws.runsDir, runId), { recursive: true, force: true });
 
-    const after = startServer(ws.env(CLAUDE_ENV));
+    const after = startServer(ws.env());
     try {
       const res = await after.call("consult", {
         prompt: "続きを",
@@ -270,7 +270,7 @@ describe("セッション索引だけで resume できる", () => {
   // 再帰は課金が伸び続けるので、警告ではなく打ち切りにする。
   it("子が MCP を継承していたら打ち切る", async () => {
     const server = startServer(
-      ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_MCP_LEAK: "1", CLAUDE_FAKE_SLEEP: "5" }),
+      ws.env({ CLAUDE_FAKE_MCP_LEAK: "1", CLAUDE_FAKE_SLEEP: "5" }),
     );
     try {
       const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir }, {}, 30_000);
@@ -281,7 +281,7 @@ describe("セッション索引だけで resume できる", () => {
   });
 
   it("壊れた行や巨大な本文でも落ちない", async () => {
-    const server = startServer(ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_WEIRD: "1" }));
+    const server = startServer(ws.env({ CLAUDE_FAKE_WEIRD: "1" }));
     try {
       const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       assert.equal(res.result.isError, undefined, textOf(res.result));
@@ -299,11 +299,12 @@ describe("claude で engine の経路が通る", () => {
 
   before(() => {
     ws = makeWorkspace("claude-engine");
+    ws.writeConfig(CLAUDE_CONFIG);
   });
   after(() => rmSync(ws.root, { recursive: true, force: true }));
 
   it("apply の git 差分が付く", async () => {
-    const server = startServer(ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_TOUCH: "seed.txt" }));
+    const server = startServer(ws.env({ CLAUDE_FAKE_TOUCH: "seed.txt" }));
     try {
       const res = await server.call("apply", { prompt: "直して", cwd: ws.gitDir });
       assert.equal(res.result.isError, undefined, textOf(res.result));
@@ -314,7 +315,7 @@ describe("claude で engine の経路が通る", () => {
   });
 
   it("切り離しても、そこまでの報告と run_id を返す", async () => {
-    const server = startServer(ws.env({ ...CLAUDE_ENV, CLAUDE_FAKE_SLEEP: "6" }));
+    const server = startServer(ws.env({ CLAUDE_FAKE_SLEEP: "6" }));
     try {
       const res = await server.call(
         "consult",
@@ -341,7 +342,7 @@ describe("backend をまたぐ resume", () => {
   });
   after(() => rmSync(ws.root, { recursive: true, force: true }));
 
-  // env のモデルを codex 系から claude 系へ変えた直後に必ず踏む。
+  // 設定のモデルを codex 系から claude 系へ変えた直後に必ず踏む。
   // 黙って失敗させず、理由を明示する。
   it("別の CLI で作られたセッションは再開できない", async () => {
     const codexServer = startServer(ws.env());
@@ -353,7 +354,8 @@ describe("backend をまたぐ resume", () => {
       codexServer.close();
     }
 
-    const claudeServer = startServer(ws.env(CLAUDE_ENV));
+    ws.writeConfig(CLAUDE_CONFIG); // ここで claude 系へ切り替える
+    const claudeServer = startServer(ws.env());
     try {
       const res = await claudeServer.call("consult", {
         prompt: "続きを",

@@ -167,6 +167,12 @@ export function makeWorkspace(prefix) {
     stdinFile: join(root, "stdin.txt"),
     pwdFile: join(root, "pwd.txt"),
     childEnvFile: join(root, "childenv.txt"),
+    // モデル/effort の設定。実体は runs の隣（AGENT_EXEC_RUNS_DIR を差し替えて
+    // いるので、実ホームの設定には触れない）。
+    configFile: join(root, "config.json"),
+    writeConfig(config) {
+      writeFileSync(join(root, "config.json"), JSON.stringify(config, null, 2));
+    },
     env(extra = {}) {
       return {
         CODEX_HOME: codexHome,

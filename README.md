@@ -5,7 +5,7 @@ Claude Code / Codex CLI で使う道具の置き場。スキルと MCP サーバ
 | 種類 | 名前 | 内容 |
 |---|---|---|
 | スキル | `consulting-slides` | 経営層向けの戦略コンサルティング資料を HTML スライド（16:9）で作成する。24種の図解パターン、ヘッドレス Chrome による全ページ画像検証つき。求められたときだけ PPTX にも変換できる |
-| MCP サーバ | `mcp-servers/agent-exec` | Codex CLI と Claude Code を MCP の tool として Claude Code へ公開する。モデル名で起動する CLI が決まる。相談と実装を委譲でき、長時間の run は切り離して後から結果を取れる |
+| MCP サーバ | `mcp-servers/agent-exec` | Codex CLI と Claude Code を MCP の tool として Claude Code へ公開する。モデル名で起動する CLI が決まる。相談と実装を委譲でき、長時間の run は切り離して後から結果を取れる。モデルと effort の設定も MCP の中（`config` tool）で完結する |
 
 ## セットアップ（各端末で1回）
 
@@ -31,8 +31,22 @@ claude mcp add agent -s user -- node ~/projects/agent-tools/mcp-servers/agent-ex
 claude mcp list   # ✔ Connected を確認
 ```
 
-反映は次に Claude Code を起動したときから。実行記録は clone の外
-（`~/.claude/agent-exec/runs`）に置かれるので、この repo は汚れない。
+**登録に `-e` は要らない。** モデル・effort は `config` tool で（登録にも環境変数にも
+持たせない）、claude に無条件で許すコマンドはコードで決まる。登録が情報を持たないので、
+登録し直しても失うものが無い。
+
+Windows（PowerShell）では `~` が展開されないので、絶対パスで書く:
+`node C:/Users/<user>/projects/agent-tools/mcp-servers/agent-exec/server.mjs`
+
+反映は次に Claude Code を起動したときから。実行記録と設定は clone の外
+（`~/.claude/agent-exec/`）に置かれるので、この repo は汚れない。
+
+起動したら、使うモデルを確認・変更できる（引数なしの `config` が現在値を返す）:
+
+```
+config()                                              いまの設定
+config({ apply: { model: "opus", effort: "xhigh" } }) 変更（次の run から有効）
+```
 
 詳細は [`mcp-servers/agent-exec/README.md`](mcp-servers/agent-exec/README.md)。
 
@@ -63,7 +77,11 @@ MCP サーバのコードを更新した場合、**動いているサーバプ�
 cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 ```
 
-実 Codex は呼ばず、ダミーに差し替えて 140 件を検証する。
+実 Codex は呼ばず、ダミーに差し替えて 151 件を検証する。
 
 **Windows では走らない**（ダミーが shebang 付きの `.sh` で、Windows は実行できない）。
-WSL / Linux / macOS で実行すること。
+WSL / Linux / macOS で実行すること。WSL 側に node が見えない場合は nvm のパスを通す:
+
+```bash
+export PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH"
+```

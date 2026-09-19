@@ -54,11 +54,12 @@ describe("MCP プロトコル", () => {
     assert.deepEqual(res.result, {});
   });
 
-  it("tools/list が 5 ツールを返す", async () => {
+  it("tools/list が 6 ツールを返す", async () => {
     const res = await server.request("tools/list", {});
     const names = res.result.tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       "apply",
+      "config",
       "consult",
       "result",
       "runs",
@@ -103,7 +104,7 @@ describe("MCP プロトコル", () => {
     const byName = Object.fromEntries(res.result.tools.map((t) => [t.name, t.description]));
     assert.match(byName.consult, /モデルは gpt-6-astra .*effort=xhigh.*固定/);
     assert.match(byName.apply, /モデルは gpt-5\.6-luna .*effort=max.*固定/);
-    assert.match(byName.consult, /呼び出し側からは変更できない/);
+    assert.match(byName.consult, /変えるなら config/);
   });
 
   it("未対応メソッドは -32601 を返す", async () => {
@@ -520,97 +521,159 @@ describe("resume の出自検証", () => {
   });
 });
 
-describe("既定の上書き", () => {
+describe("config tool", () => {
+  let ws;
+  let server;
+
+  before(() => {
+    ws = makeWorkspace("config");
+    server = startServer(ws.env());
+  });
+  after(() => {
+    server.close();
+    rmSync(ws.root, { recursive: true, force: true });
+  });
+
+  it("引数なしなら現在の設定と、その値の出どころを返す", async () => {
+    const text = textOf((await server.call("config", {})).result);
+    assert.match(text, /consult: model=gpt-6-astra（コード既定）/);
+    assert.match(text, /apply: model=gpt-5\.6-luna（コード既定/);
+    assert.match(text, /設定ファイル: /, "どこを見れば分かるかも返す");
+    assert.match(text, /選べる effort: /);
+  });
+
+  // 設定を run ごとに解決しているからこそ、同じサーバのまま次の run に効く。
+  // 起動時に焼いていた頃は、変更のたびに Claude Code の再起動が要った。
+  it("変更が同じサーバの次の run から効く（再起動が要らない）", async () => {
+    const res = await server.call("config", {
+      consult: { model: "gpt-5.5", effort: "medium" },
+    });
+    assert.equal(res.result.isError, undefined, textOf(res.result));
+    assert.match(textOf(res.result), /consult: model=gpt-5\.5（config \/ コード既定は gpt-6-astra）/);
+
+    await server.call("consult", { prompt: "x", cwd: ws.plainDir });
+    const argv = argvOf(ws.argvFile);
+    assert.equal(argv[argv.indexOf("-m") + 1], "gpt-5.5");
+    assert.ok(argv.includes('model_reasoning_effort="medium"'), argv.join(" "));
+  });
+
+  it("モデル名を変えると起動する CLI も変わる", async () => {
+    await server.call("config", { apply: { model: "sonnet", effort: "xhigh" } });
+    await server.call("apply", { prompt: "x", cwd: ws.gitDir });
+    const argv = argvOf(ws.argvFile);
+    assert.ok(argv.includes("-p"), `claude で起動していない: ${argv.join(" ")}`);
+    assert.equal(argv[argv.indexOf("--model") + 1], "sonnet");
+  });
+
+  it("tools/list の説明にも今の設定が出る", async () => {
+    const res = await server.request("tools/list", {});
+    const byName = Object.fromEntries(res.result.tools.map((t) => [t.name, t.description]));
+    assert.match(byName.apply, /モデルは sonnet/);
+  });
+
+  it("null でコード既定に戻る", async () => {
+    await server.call("config", { consult: { model: null, effort: null } });
+    const text = textOf((await server.call("config", {})).result);
+    assert.match(text, /consult: model=gpt-6-astra（コード既定/);
+  });
+
+  it("空文字なら CLI 側の設定に委ねる", async () => {
+    await server.call("config", { apply: { model: "", effort: "" } });
+    const res = await server.call("apply", { prompt: "x", cwd: ws.gitDir });
+    assert.equal(res.result.isError, undefined, textOf(res.result));
+    const argv = argvOf(ws.argvFile);
+    assert.ok(!argv.includes("-m"), argv.join(" "));
+    assert.ok(!argv.some((a) => a.startsWith("model_reasoning_effort")), argv.join(" "));
+    assert.match(textOf(res.result), /model=\(config 既定\)/);
+    await server.call("config", { apply: { model: null, effort: null } });
+  });
+
+  // run では使えない値を捨てて走らせる（止めるより走らせたほうがよい）が、設定は
+  // 意図してやる操作なので、黙って別の値になるほうが困る。断って対応値を返す。
+  it("モデルが対応しない effort は拒否し、対応値を添える", async () => {
+    const res = await server.call("config", { consult: { model: "gpt-5.5", effort: "ultra" } });
+    assert.equal(res.result.isError, true);
+    assert.match(textOf(res.result), /対応していません/);
+    assert.match(textOf(res.result), /low, medium, high, xhigh/);
+    assert.match(textOf(res.result), /設定は変更していません/);
+    const after = textOf((await server.call("config", {})).result);
+    assert.match(after, /consult: model=gpt-6-astra/, "拒否したのに書き換わっている");
+  });
+
+  it("未知のキー・型・tool を弾く", async () => {
+    const badKey = await server.call("config", { consult: { models: "opus" } });
+    assert.equal(badKey.result.isError, true);
+    assert.match(textOf(badKey.result), /未知のキー/);
+
+    const badType = await server.call("config", { consult: { model: 3 } });
+    assert.equal(badType.result.isError, true);
+    assert.match(textOf(badType.result), /文字列か null/);
+
+    const badTool = await server.call("config", { status: { model: "opus" } });
+    assert.equal(badTool.result.isError, true);
+    assert.match(textOf(badTool.result), /未知の引数/);
+  });
+});
+
+describe("手で書かれた設定の扱い", () => {
   let ws;
 
   before(() => {
-    ws = makeWorkspace("defaults");
+    ws = makeWorkspace("config-manual");
   });
   after(() => rmSync(ws.root, { recursive: true, force: true }));
 
-  it("環境変数で既定を変えられる", async () => {
-    const server = startServer(
-      ws.env({ AGENT_EXEC_CONSULT_MODEL: "gpt-5.5", AGENT_EXEC_CONSULT_EFFORT: "medium" }),
-    );
+  // config tool は不正値を弾くが、ファイルは手でも編集できる。その場合は run を
+  // 止めずに値を捨て、**捨てたことを run の応答にも出す**（stderr だけだと、
+  // 「設定したのに効いていない」に気づけない）。
+  it("使えない effort は捨てて走り、応答と stderr の両方に出る", async () => {
+    ws.writeConfig({ consult: { model: "gpt-5.5", effort: "ultra" } });
+    const server = startServer(ws.env());
     try {
-      await server.call("consult", { prompt: "x", cwd: ws.plainDir });
+      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
+      assert.equal(res.result.isError, undefined, textOf(res.result));
       const argv = argvOf(ws.argvFile);
       assert.equal(argv[argv.indexOf("-m") + 1], "gpt-5.5");
-      assert.ok(argv.includes('model_reasoning_effort="medium"'), argv.join(" "));
+      assert.ok(!argv.some((a) => a.startsWith("model_reasoning_effort")), argv.join(" "));
+      assert.match(textOf(res.result), /⚠ 設定: .*effort=ultra/);
+      assert.match(server.stderr, /effort=ultra/);
     } finally {
       server.close();
     }
   });
 
-  // 5.0.0 で CODEX_MCP_* を AGENT_EXEC_* に改名した。端末ごとにセットアップする運用
-  // では「片方の端末だけ旧名のまま」が必ず起きるので、旧名も読んで警告を出す。
-  it("旧 CODEX_MCP_* も読み、警告を出す", async () => {
-    const env = ws.env({ CODEX_MCP_CONSULT_MODEL: "gpt-5.5" });
-    delete env.AGENT_EXEC_CONSULT_MODEL;
-    const server = startServer(env);
-    try {
-      await server.call("consult", { prompt: "x", cwd: ws.plainDir });
-      const argv = argvOf(ws.argvFile);
-      assert.equal(argv[argv.indexOf("-m") + 1], "gpt-5.5");
-      assert.match(server.stderr, /CODEX_MCP_CONSULT_MODEL は AGENT_EXEC_CONSULT_MODEL に改名/);
-    } finally {
-      server.close();
-    }
-  });
-
-  it("新名は旧名より優先される", async () => {
-    const server = startServer(
-      ws.env({
-        AGENT_EXEC_CONSULT_MODEL: "gpt-6-astra",
-        CODEX_MCP_CONSULT_MODEL: "gpt-5.5",
-      }),
-    );
+  it("壊れた JSON でも起動し、コード既定で走る", async () => {
+    writeFileSync(ws.configFile, "{ これは JSON ではない");
+    const server = startServer(ws.env());
     try {
       await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       const argv = argvOf(ws.argvFile);
       assert.equal(argv[argv.indexOf("-m") + 1], "gpt-6-astra");
+      assert.match(server.stderr, /読めないためコード既定/);
     } finally {
       server.close();
     }
   });
+});
 
-  it("空文字で既定を外し config.toml に委ねられる", async () => {
-    const server = startServer(ws.env({ AGENT_EXEC_APPLY_MODEL: "", AGENT_EXEC_APPLY_EFFORT: "" }));
-    try {
-      const res = await server.call("apply", { prompt: "x", cwd: ws.gitDir });
-      assert.equal(res.result.isError, undefined, textOf(res.result));
-      const argv = argvOf(ws.argvFile);
-      assert.ok(!argv.includes("-m"), argv.join(" "));
-      assert.ok(!argv.some((a) => a.startsWith("model_reasoning_effort")), argv.join(" "));
-      assert.match(textOf(res.result), /model=\(config 既定\) effort=\(config 既定\)/);
-    } finally {
-      server.close();
-    }
+// 5.0.0 で CODEX_MCP_* を AGENT_EXEC_* に改名した。モデル/effort の環境変数は 7.0.0 で
+// 廃したが、記録先などの運用系は残っている。旧名も読んで警告を出す仕組みを固定する。
+describe("旧名の環境変数", () => {
+  let ws;
+
+  before(() => {
+    ws = makeWorkspace("legacyenv");
   });
+  after(() => rmSync(ws.root, { recursive: true, force: true }));
 
-  it("既定 effort がモデル非対応なら押し付けない", async () => {
-    const server = startServer(
-      ws.env({ AGENT_EXEC_CONSULT_MODEL: "gpt-5.5", AGENT_EXEC_CONSULT_EFFORT: "ultra" }),
-    );
+  it("CODEX_MCP_RUNS_DIR も読み、警告を出す", async () => {
+    const env = ws.env({ CODEX_MCP_RUNS_DIR: ws.runsDir });
+    delete env.AGENT_EXEC_RUNS_DIR;
+    const server = startServer(env);
     try {
       const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
       assert.equal(res.result.isError, undefined, textOf(res.result));
-      const argv = argvOf(ws.argvFile);
-      assert.equal(argv[argv.indexOf("-m") + 1], "gpt-5.5");
-      assert.ok(!argv.some((a) => a.startsWith("model_reasoning_effort")), argv.join(" "));
-    } finally {
-      server.close();
-    }
-  });
-
-  it("不正な既定 effort は警告して無視する", async () => {
-    const server = startServer(ws.env({ AGENT_EXEC_CONSULT_EFFORT: "bogus" }));
-    try {
-      const res = await server.call("consult", { prompt: "x", cwd: ws.plainDir });
-      assert.equal(res.result.isError, undefined, textOf(res.result));
-      const argv = argvOf(ws.argvFile);
-      assert.ok(!argv.some((a) => a.startsWith("model_reasoning_effort")), argv.join(" "));
-      assert.match(server.stderr, /既定 reasoning_effort が不正/);
+      assert.match(server.stderr, /CODEX_MCP_RUNS_DIR は AGENT_EXEC_RUNS_DIR に改名/);
     } finally {
       server.close();
     }

@@ -83,14 +83,29 @@ function scrubbedEnv() {
   return env;
 }
 
-// テストなど、承認が要るコマンドを明示的に許す。既定は空。
+// テストなど、承認が要るコマンドを明示的に許す。
 //
-// 空にしてあるのは、ここに何を入れるかが「どのコマンドを無条件で実行してよいか」の
-// 宣言そのものだから。既定で埋めると、利用者が意図しないコマンドが走る。
-// 例: AGENT_EXEC_CLAUDE_ALLOWED_TOOLS="Bash(node --test*) Bash(uv run pytest*)"
+// 6.3.0 まで既定は空で、宣言の入口は環境変数だけだった。「どのコマンドを無条件で
+// 実行してよいか」の宣言をこちらで埋めるべきではない、という理由からだったが、
+// 置き場所として環境変数が保たなかった。`claude mcp` には env だけを編集する
+// サブコマンドが無く、登録し直すたびに指定漏れで消える。実際に消え、codex の既定へ
+// 黙って戻っていたのに数時間気づけなかった（消えたことを外から見る手段が無い）。
+// 宣言はコードに置く。git に残るので「なぜ許しているか」を後から追え、再登録でも
+// 消えない。端末ごとの事情は環境変数で上書きする。
+const DEFAULT_ALLOWED_TOOLS = [
+  "Bash(uv run pytest*)",
+  "Bash(uv run ruff*)",
+  "Bash(uv run python*)",
+  "Bash(git stash*)",
+];
+
+// 環境変数はこの既定を置き換える（足すのではない）。空文字は「何も許さない」の明示で、
+// 既定を無効にする唯一の手段。区切りは 2 個以上の空白かカンマ。
+// 例: AGENT_EXEC_CLAUDE_ALLOWED_TOOLS="Bash(node --test*)  Bash(uv run pytest*)"
 function allowedToolPatterns() {
   const raw = readEnv("AGENT_EXEC_CLAUDE_ALLOWED_TOOLS");
-  if (!raw || raw.trim() === "") return [];
+  if (raw === undefined) return DEFAULT_ALLOWED_TOOLS;
+  if (raw.trim() === "") return [];
   return raw.split(/\s{2,}|,(?![^(]*\))/).map((s) => s.trim()).filter(Boolean);
 }
 
@@ -108,6 +123,17 @@ export default {
 
   sandbox(capability) {
     return SANDBOX[capability] ?? SANDBOX.read;
+  },
+
+  // config tool の表示用。許可リストは「消えたことに気づけない」筆頭なので、
+  // 中身と出どころ（コード既定か環境変数か）を必ず出す。
+  describeConfig() {
+    const overridden = readEnv("AGENT_EXEC_CLAUDE_ALLOWED_TOOLS") !== undefined;
+    const patterns = allowedToolPatterns();
+    return [
+      `許可コマンド (${overridden ? "AGENT_EXEC_CLAUDE_ALLOWED_TOOLS" : "コード既定"}): ` +
+        (patterns.length > 0 ? patterns.join("  ") : "(なし)"),
+    ];
   },
 
   // claude のモデル名は開いた集合（alias も完全な id も受け付ける）。照合しない。

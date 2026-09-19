@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 import claudeBackend from "../lib/backends/claude.mjs";
 import codexBackend from "../lib/backends/codex.mjs";
 import { adapterById, resolveAdapter } from "../lib/backends/index.mjs";
+import { resolveSettings, validatePatch } from "../lib/settings.mjs";
 
 describe("モデル名からアダプタを決める", () => {
   it("claude 系の名前は claude へ", () => {
@@ -143,6 +144,39 @@ describe("claude の argv", () => {
     assert.equal(claudeBackend.supportsEffort("opus", "ultra"), false);
     assert.equal(claudeBackend.supportsEffort("opus", "max"), true);
     assert.ok(!claudeBackend.efforts.includes("ultra"));
+  });
+
+  // 許可リストの置き場をコードへ移した（環境変数だけだと再登録で静かに消えた）。
+  // 未設定＝既定 / 設定＝置換 / 空文字＝無効、の 3 分岐を固定する。
+  it("許可リストは既定がコードにあり、環境変数で上書きできる", () => {
+    const KEY = "AGENT_EXEC_CLAUDE_ALLOWED_TOOLS";
+    const saved = process.env[KEY];
+    // --allowedTools は可変長なので末尾に置いてある。以降は全て許可パターン。
+    const patternsOf = () => {
+      const { argv } = claudeBackend.buildLaunch({ ...base, capability: "write" });
+      const at = argv.indexOf("--allowedTools");
+      return at < 0 ? [] : argv.slice(at + 1);
+    };
+    try {
+      delete process.env[KEY];
+      assert.deepEqual(patternsOf(), [
+        "Bash(uv run pytest*)",
+        "Bash(uv run ruff*)",
+        "Bash(uv run python*)",
+        "Bash(git stash*)",
+      ]);
+      process.env[KEY] = "Bash(node --test*)  Bash(cargo test*)";
+      assert.deepEqual(
+        patternsOf(),
+        ["Bash(node --test*)", "Bash(cargo test*)"],
+        "環境変数は既定に足すのではなく置き換える",
+      );
+      process.env[KEY] = "";
+      assert.deepEqual(patternsOf(), [], "空文字は「何も許さない」の明示");
+    } finally {
+      if (saved === undefined) delete process.env[KEY];
+      else process.env[KEY] = saved;
+    }
   });
 
   it("親セッションの環境変数を子から消す", () => {
@@ -348,5 +382,47 @@ describe("codex アダプタ（純関数の側）", () => {
     const d = codexBackend.parseEvent({ type: "turn.completed", usage: { input_tokens: 1 } });
     assert.equal(d.completed, true);
     assert.equal(d.finalMessage, undefined);
+  });
+});
+
+// 設定の重ね方（コード既定 → config.json）。ファイルには触らず、config を直接渡す。
+describe("設定の解決", () => {
+  const consult = { baseModel: "gpt-6-astra", baseEffort: "xhigh" };
+
+  it("config が無ければコード既定", () => {
+    const s = resolveSettings("consult", consult, {});
+    assert.equal(s.model, "gpt-6-astra");
+    assert.equal(s.effort, "xhigh");
+    assert.deepEqual(s.fromConfig, { model: false, effort: false });
+    assert.equal(s.adapter.id, "codex");
+  });
+
+  it("config が上書きし、モデル名で CLI が決まる", () => {
+    const s = resolveSettings("consult", consult, { consult: { model: "opus" } });
+    assert.equal(s.adapter.id, "claude");
+    assert.equal(s.model, "opus");
+    assert.equal(s.effort, "xhigh", "指定していない側はコード既定のまま");
+    assert.deepEqual(s.fromConfig, { model: true, effort: false });
+  });
+
+  it("空文字は「CLI 側に委ねる」で、未設定とは違う", () => {
+    const s = resolveSettings("consult", consult, { consult: { model: "", effort: "" } });
+    assert.equal(s.model, undefined);
+    assert.equal(s.effort, undefined);
+    assert.deepEqual(s.fromConfig, { model: true, effort: true });
+  });
+
+  // 使えない値で毎 run 失敗させない。捨てたことは notes に残し、呼び出し側へ出す。
+  it("使えない effort は捨てて理由を残す", () => {
+    const s = resolveSettings("consult", consult, { consult: { effort: "ultra", model: "opus" } });
+    assert.equal(s.effort, undefined);
+    assert.match(s.notes.join("\n"), /effort=ultra/);
+  });
+
+  it("保存前の検査は、使えない値を理由つきで断る", () => {
+    assert.equal(validatePatch("consult", consult, { model: "opus" }, {}), null);
+    const reason = validatePatch("consult", consult, { model: "opus", effort: "ultra" }, {});
+    assert.match(reason, /ultra/);
+    assert.match(reason, /low, medium, high, xhigh, max/, "対応値を添える");
   });
 });

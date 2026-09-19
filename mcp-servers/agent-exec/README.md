@@ -6,7 +6,7 @@ Codex CLI (`codex exec`) と Claude Code (`claude -p`) を動かせる。
 ## モデル名で起動する CLI が決まる
 
 **`backend` のような引数は無い。** 利用者が決めるのはモデルと effort だけで
-（[tool の引数ではなく環境変数](#モデルと-effort-は利用者だけが決める)）、モデルが
+（[run の引数ではなく `config` tool](#モデルと-effort-は利用者だけが決める)）、モデルが
 決まれば行き先も決まる。
 
 ```
@@ -37,6 +37,7 @@ lib/engine.mjs           プロセスの起動/監視/打ち切り/完了判定/
 lib/git.mjs              git の状態取得と差分
 lib/runs.mjs             run の記録
 lib/platform.mjs         プロセスの同定（OS 差の吸収）
+lib/settings.mjs         モデル/effort の設定（config.json の読み書きと解決）
 lib/env.mjs              環境変数の読み出し（旧名の互換込み）
 lib/backends/index.mjs   モデル名 → アダプタの解決
 lib/backends/codex.mjs   codex exec 固有
@@ -67,6 +68,7 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 | `status` | 切り離した run の進捗を見る |
 | `result` | 切り離した run の報告を取る |
 | `runs` | 最近の run を一覧する。モデル・effort・所要時間・失敗理由が出る |
+| `config` | モデルと effort を確認・変更する。引数なしなら現在の設定を返す |
 
 ### consult / apply
 
@@ -86,6 +88,8 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 
 ### モデルと effort は利用者だけが決める
 
+コード既定:
+
 | tool | モデル | effort |
 |---|---|---|
 | `consult` | `gpt-6-astra` | `xhigh` |
@@ -94,45 +98,65 @@ Node 標準モジュールのみで動く（依存ゼロ、`npm install` 不要�
 コードを書くのは `apply` だけなので、そこだけ別のモデルにしている。レビューを
 別系統のモデル（astra）に任せることで、書いたモデルと同じ癖で見落とすのを避ける。
 
-**`model` と `reasoning_effort` は tool の引数ではない。** 呼び出し側の LLM からは
-指定できない（渡すと「未知の引数です」で弾く）。
+**`model` と `reasoning_effort` は run の引数ではない。** `consult` / `apply` に渡すと
+「未知の引数です」で弾く。
 
 そうしたのは、**呼び出し側が既定を無視するのを実測したため**である。保持していた 25 run
 すべてが `gpt-6-astra` で、`apply` の既定 `gpt-5.6-luna` は一度も発動していなかった
 （呼び出し側が毎回 `model` を明示していた）。effort も 4 run で勝手に下げられていた。
-どのモデルにいくら払うかは利用者が決めることなので、入口を塞ぐ。
+**埋める欄があれば LLM は埋める。** どのモデルにいくら払うかは利用者が決めることなので、
+run の入口は塞いだままにする。
 
-既定の effort がそのモデルで非対応の場合は押し付けず、Codex 側の既定に委ねる。判定は
-**起動時**に行い（呼び出し側から渡せない以上、実行時に弾いても直す手段が無い）、
-落とした場合は stderr に warning を出す。
+変えるときは `config` tool を呼ぶ。run のたびに起きる操作ではなく、「モデルを切り替える」
+という独立した意図的な操作なので、上の失敗は再発しない。
 
 ### どこで変えるか
 
 ```
-呼び出し側の LLM       → 渡せない
-環境変数               → その端末だけの上書き
-TOOL_MODES の既定      ← 全端末の基準
-~/.codex/config.toml   → 環境変数に空文字を渡したときだけ
+run の引数              → 渡せない
+config tool             ← ここで変える（config.json に保存、次の run から有効）
+TOOL_MODES のコード既定  → config に無い項目の基準
+~/.codex/config.toml    → model に "" を渡して CLI へ委ねたときだけ
 ```
 
-| 変える場所 | 効く範囲 | 使いどころ |
-|---|---|---|
-| `server.mjs` の `TOOL_MODES` | **全端末**（push → pull → サーバ再起動） | 基準を変えるとき |
-| 環境変数（[下記](#環境変数)） | その端末だけ | 一時的に別のモデルを試すとき |
+```
+config()                                        いまの設定を返す
+config({ apply: { model: "opus", effort: "xhigh" } })   変更する
+config({ apply: { model: null } })              コード既定に戻す
+config({ apply: { model: "" } })                CLI 側の設定に委ねる
+```
 
-`envDefault(process.env.X, "fallback")` の**第 2 引数がコードの既定**なので、基準を
-変えるならそこを書き換える。
+保存先は `~/.claude/agent-exec/config.json`（run の記録の隣＝clone の外）。**サーバの
+再起動は要らない**。設定は run ごとに解決されるので、次の run から効く。
 
-**全端末で揃えたいなら、環境変数ではなくコードの既定を変えること。** `~/.claude.json`
-は端末間で同期されないので、環境変数でやると入れ忘れた端末が黙って別のモデルで動き、
-しかも気づく手段がない。`claude mcp add -e ...` は履歴にも残らず、後から「なぜこの
-モデルなのか」を追えない。コードなら `git log -p` に理由が残り、各端末のセットアップ
-手順も 1 行のままで済む（既に `git pull` する運用があるので、配布経路を増やさずに済む）。
+**7.0.0 で環境変数（`AGENT_EXEC_CONSULT_MODEL` など 4 つ）を廃した。** 理由は 2 つある。
 
-**既定を変えたら `SERVER_VERSION` を上げること。** `git pull` してもプロセスは古い
+1. **MCP しか使えないエージェントから設定が扱えなかった。** 設定が MCP の外にあるせいで、
+   確認手段（`--print-config`）・規則の置き場（README）・そこへ誘導する仕組み（ホームの
+   `CLAUDE.md`）と、外側に道具を足し続けることになっていた。MCP の中に置けば全部要らない。
+2. **静かに消えた。** 2026-09-19 12:22 に起動したサーバは claude（consult=opus /
+   apply=sonnet）で 10 run 動いていたが、その後の再登録で `-e` の指定が欠け、codex の
+   既定へ黙って戻った。気づいたのは run の記録を掘ったときで、数時間あとである。
+   `claude mcp` には env だけを編集するサブコマンドが無く、`remove` → `add` で入れ直す
+   しかないため、**書き漏らした変数は消える**。ファイルなら消えない。
+
+結果として、**登録は引数ゼロ**になった（`claude mcp add agent -s user -- node .../server.mjs`）。
+登録に情報を持たせないので、雑に登録し直しても失うものが無い。
+
+使えない値の扱いは、経路によって分けてある。
+
+| 経路 | 使えない値をどうするか |
+|---|---|
+| `config` tool | **断る**。対応値の一覧を添えて返し、ファイルは書き換えない |
+| run（手で書いた config など） | **捨てて走らせる**。捨てたことを run の応答と stderr の両方に出す |
+
+設定は意図してやる操作なので、黙って別の値になるほうが困る。run は逆で、止めるより
+走らせたほうがよい（毎 run 失敗するのが最悪）。
+
+**コード既定を変えたら `SERVER_VERSION` を上げること。** `git pull` してもプロセスは古い
 コードを持ち続けるため（[変更を反映させる](#変更を反映させる)）、「ファイルは新しいが
 プロセスは古い」状態が必ず起きる。これを外から見分ける手段は `serverInfo.version` しか
-ない。既定モデルの変更は挙動の変更なので、版を上げる対象に含める。
+ない。`config` での変更は再起動が要らないので、この話は**コードを変えたときだけ**。
 
 ## テストを誰が走らせるか（`codex_verify` を廃した理由）
 
@@ -196,22 +220,42 @@ TOOL_MODES の既定      ← 全端末の基準
 
 ### テストを走らせるには許可リストが要る
 
-上のとおり `node --test` や `uv run pytest` は既定では拒否される。つまり claude の `apply`
-では、そのままだと [`TEST_NOTE`](#作業範囲) を満たせない。許可するコマンドは利用者が
-環境変数で宣言する:
+上のとおり `node --test` や `uv run pytest` は `acceptEdits` では拒否される。つまり claude の
+`apply` では、許可リストが空だと [`TEST_NOTE`](#作業範囲) を満たせない。宣言は
+`lib/backends/claude.mjs` の `DEFAULT_ALLOWED_TOOLS` にある:
 
-```bash
-AGENT_EXEC_CLAUDE_ALLOWED_TOOLS='Bash(node --test*)  Bash(uv run pytest*)'
+```js
+const DEFAULT_ALLOWED_TOOLS = [
+  "Bash(uv run pytest*)",
+  "Bash(uv run ruff*)",
+  "Bash(uv run python*)",
+  "Bash(git stash*)",
+];
 ```
 
-**既定は空にしてある。** ここに何を書くかは「どのコマンドを無条件で実行してよいか」の
-宣言そのものなので、こちらで埋めると利用者が意図しないコマンドが走る。未設定のときは
-テストが拒否され、その事実が応答に出る:
+このリポジトリ自身のテスト（`node --test`）は既定に入れていない。claude の `apply` に
+agent-exec を触らせるときだけ、下記の環境変数で足すこと。
+
+**6.3.0 まで既定は空で、入口は環境変数だけだった。** 「どのコマンドを無条件で実行して
+よいか」の宣言をこちらで埋めるべきではない、という理由からである。理屈は今も正しいが、
+置き場所として環境変数が保たなかった（[どこで変えるか](#どこで変えるか)）。登録し直す
+たびに消え、消えたことに気づく手段が無い。**コードなら宣言が git に残り、なぜ許して
+いるのかを後から追えて、再登録でも消えない。** 端末ごとの事情は環境変数で上書きする:
+
+```bash
+# 既定を置き換える（足すのではない）。区切りは 2 個以上の空白かカンマ
+AGENT_EXEC_CLAUDE_ALLOWED_TOOLS='Bash(node --test*)  Bash(uv run pytest*)'
+# 空文字は「何も許さない」の明示。既定を無効にする唯一の手段
+AGENT_EXEC_CLAUDE_ALLOWED_TOOLS=''
+```
+
+許可していないコマンドが拒否されたときは、その事実が応答に出る:
 
 ```
 ⚠ 次の操作は許可されていないため実行されませんでした:
   - Bash: node --test
-  許可するには AGENT_EXEC_CLAUDE_ALLOWED_TOOLS に追加してください（例: "Bash(node --test*)"）。
+  許可するには claude.mjs の DEFAULT_ALLOWED_TOOLS（全端末）か
+  AGENT_EXEC_CLAUDE_ALLOWED_TOOLS（その端末だけ）に追加してください（例: "Bash(node --test*)"）。
 ```
 
 黙って「テストは走りませんでした」で終わらせないのが肝で、原因と直し方が同じ場所に出る。
@@ -468,7 +512,7 @@ cd ~/projects/agent-tools/mcp-servers/agent-exec && node --test test/*.test.mjs
 
 実 Codex は呼ばず、`test/fake-codex.sh` を `CODEX_BIN` として差し替える。ダミーは
 `--json` のイベント列を模し、環境変数で遅延・異常終了・孫プロセス・ファイル変更を再現する。
-140 件。
+151 件。
 
 **Windows では走らない。** ダミーが shebang 付きの `.sh` で、Windows は shebang を
 実行できない（`spawn EFTYPE`）。spawn を伴わない検証は通るが、それ以外は全滅する。
@@ -490,8 +534,12 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 6.2.0
+現在: 7.0.0
 ```
+
+**いまどの設定で動くかは `config` tool で分かる**（引数なしで呼ぶ）。コード既定か config
+かの別、選べる effort、claude の許可コマンドまで返す。起動時にも同じ内容の要約を stderr へ
+出すが、そちらは `/mcp` のログに埋もれて読まれないので、確認は tool を使うこと。
 
 | version | 変更 |
 |---|---|
@@ -513,6 +561,8 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 | 6.1.0 | `runs` にモデル・effort・所要時間・失敗理由・記録の場所を出す（「どのモデルで問題が起きているか」を聞かれたとき、記録はあるのに答えられなかった） |
 | 6.1.1 | `consult` の説明文をレビュー役として書き直す（記録では用途の 100% がレビューで、調査は 0 件だった）。tool 説明から codex 固有の表現を除く |
 | 6.2.0 | 外部レビューで挙がった 6 件を修正（下記）。repo 予約の競合、打ち切り中の SIGKILL 取り消し、`result` に拒否・失敗が出ない、セッション索引の `backend` 欠落、接続先の環境変数の巻き添え削除、ダミーの実行権限 |
+| 6.3.0 | claude の許可リストをコード既定（`DEFAULT_ALLOWED_TOOLS`）へ移す。登録が引数ゼロで済むようになり、再登録で設定が黙って消えなくなった。あわせて `--print-config` を追加 |
+| 7.0.0 | **モデル/effort の設定を `config` tool に集約**。環境変数 4 つ（`AGENT_EXEC_*_MODEL` / `_EFFORT`）と `--print-config` を廃止。設定は `config.json` に保存し、run ごとに解決するのでサーバ再起動が要らない。MCP しか使えない呼び出し側からも設定を扱える（[経緯](#どこで変えるか)） |
 
 ## 環境変数
 
@@ -521,12 +571,8 @@ WSL / Linux / macOS で実行すること。なお `core.autocrlf=true` の Wind
 | `CODEX_BIN` | `codex` | codex 実行ファイル |
 | `CODEX_HOME` | `~/.codex` | `models_cache.json` の探索先 |
 | `CLAUDE_BIN` | `claude` | claude 実行ファイル |
-| `AGENT_EXEC_CLAUDE_ALLOWED_TOOLS` | （空） | claude で無条件に許すコマンド。テストを走らせるために要る（[上記](#テストを走らせるには許可リストが要る)）。2 個以上の空白かカンマ区切り |
+| `AGENT_EXEC_CLAUDE_ALLOWED_TOOLS` | `DEFAULT_ALLOWED_TOOLS`（uv run pytest / ruff / python, git stash） | claude で無条件に許すコマンド。テストを走らせるために要る（[上記](#テストを走らせるには許可リストが要る)）。2 個以上の空白かカンマ区切り。既定を**置き換える**。空文字で無効化 |
 | `AGENT_EXEC_RUNS_DIR` | `~/.claude/agent-exec/runs` | run の記録先（clone の外に置く） |
-| `AGENT_EXEC_CONSULT_MODEL` | `gpt-6-astra` | `consult` のモデル |
-| `AGENT_EXEC_CONSULT_EFFORT` | `xhigh` | `consult` の effort |
-| `AGENT_EXEC_APPLY_MODEL` | `gpt-5.6-luna` | `apply` のモデル |
-| `AGENT_EXEC_APPLY_EFFORT` | `max` | `apply` の effort |
 | `AGENT_EXEC_MAX_CONCURRENCY` | `3` | 同時に走らせる codex の本数 |
 | `AGENT_EXEC_MAX_RUNS` | `50` | 保持する run の件数 |
 | `AGENT_EXEC_PRUNE_GRACE_MS` | `120000` | 完了直後の run を保護する時間 |
@@ -546,21 +592,17 @@ codex というバックエンド固有の設定なので改名していない�
 mv ~/.claude/codex-exec ~/.claude/agent-exec
 ```
 
-モデル / effort の環境変数に**空文字**を渡すと「既定なし」になり、`~/.codex/config.toml`
-に委ねる。
+**モデルと effort の環境変数は 7.0.0 で廃止した。** 変更は `config` tool から行う
+（→ [どこで変えるか](#どこで変えるか)）。ここに残っているのは、実行ファイルの位置・
+記録先・上限値といった**その端末の事情**だけで、どれも登録時に指定する必要は無い。
 
-環境変数は**その端末だけの上書き**である（→ [どこで変えるか](#どこで変えるか)）。
-既存サーバの `env` を書き換えるサブコマンドは無いので、登録し直すか `~/.claude.json` を
-直接編集する:
+**登録に `-e` を持たせないこと。** `claude mcp` には env だけを編集するサブコマンドが
+無く、`remove` → `add` で入れ直すため、前に付けていた変数は書き漏らすと黙って消える
+（実際に消えた → [どこで変えるか](#どこで変えるか)）。登録は引数ゼロで足りる:
 
 ```bash
-claude mcp remove agent -s user
-claude mcp add agent -s user \
-  -e AGENT_EXEC_APPLY_MODEL=gpt-6-astra \
-  -- node ~/projects/agent-tools/mcp-servers/agent-exec/server.mjs
+claude mcp add agent -s user -- node <clone>/mcp-servers/agent-exec/server.mjs
 ```
-
-全端末で揃えたい場合はここではなく `TOOL_MODES` を変える。
 
 ## 設計上の注意
 
@@ -629,7 +671,7 @@ claude mcp add agent -s user \
   （例: そのモデルはこのアカウントで使えない）が伝わらない。
 - **モデルの提供終了**: `models_cache.json` は codex 実行のたびに更新される。実際に
   `gpt-5.3-codex-spark` が一覧から消え、指定すると 400 で弾かれるようになった。
-  起動時の `checkDefaults` はキャッシュとの照合なので、キャッシュが古いと気づけない。
+  設定を解決するときのキャッシュ照合では、キャッシュが古いと気づけない。
 - **同時実行**: 既定 3 本。切り離した run もスロットを保持する（codex は走り続けている
   ため）。空きを `timeout_ms` 待っても取れなければエラーを返す。
 - **同じ repo での並行 apply**: 拒否する。同時に走らせると互いの変更を奪い合ううえ、

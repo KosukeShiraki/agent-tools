@@ -28,8 +28,16 @@ import {
   waitFor,
 } from "./lib/engine.mjs";
 import { captureGitState, diffGitState, gitRoot } from "./lib/git.mjs";
-import { readEnv, readEnvInt } from "./lib/env.mjs";
-import { adapterById, resolveAdapter } from "./lib/backends/index.mjs";
+import { readEnvInt } from "./lib/env.mjs";
+import { adapterById } from "./lib/backends/index.mjs";
+import {
+  CONFIG_PATH,
+  SETTING_KEYS,
+  readConfig,
+  resolveSettings,
+  updateConfig,
+  validatePatch,
+} from "./lib/settings.mjs";
 import {
   createRun,
   isValidRunId,
@@ -46,7 +54,7 @@ import {
 } from "./lib/runs.mjs";
 
 const SERVER_NAME = "agent-exec";
-const SERVER_VERSION = "6.2.0";
+const SERVER_VERSION = "7.0.0";
 const DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 // 反射してよいのはサポートしている版だけ。未知の版には自分の版を返す。
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -98,16 +106,11 @@ const TEST_NOTE =
   "実行したコマンドと結果（件数・失敗の有無）を報告に含めてください。" +
   "実行しなかった場合は、その理由を報告に明記してください。";
 
-// 環境変数での上書き。未設定なら fallback、空文字なら「既定なし」
-//（= CLI 側の設定ファイルに委ねる）を意味する。
-function envDefault(name, legacyName, fallback) {
-  const value = readEnv(name, legacyName);
-  if (value === undefined) return fallback;
-  return value === "" ? undefined : value;
-}
-
 // capability は「読み取り専用 / 書ける」という中立の抽象。どの CLI のどのフラグで
 // それを実現するかはアダプタが知っている（codex は -s、claude はツール許可リスト）。
+//
+// baseModel / baseEffort は**コードの既定**であって、実際に使われる値ではない。
+// 実効値は config.json を重ねて run ごとに決まる（lib/settings.mjs）。
 const TOOL_MODES = {
   consult: {
     capability: "read",
@@ -115,16 +118,8 @@ const TOOL_MODES = {
     cwdRequired: false,
     scopeNote: false,
     defaultDelegate: false, // 相談でも委譲しない（レビューは呼び出し側が回す）
-    defaultModel: envDefault(
-      "AGENT_EXEC_CONSULT_MODEL",
-      "CODEX_MCP_CONSULT_MODEL",
-      "gpt-6-astra",
-    ),
-    defaultEffort: envDefault(
-      "AGENT_EXEC_CONSULT_EFFORT",
-      "CODEX_MCP_CONSULT_EFFORT",
-      "xhigh",
-    ),
+    baseModel: "gpt-6-astra",
+    baseEffort: "xhigh",
   },
   apply: {
     capability: "write",
@@ -132,22 +127,16 @@ const TOOL_MODES = {
     cwdRequired: true,
     scopeNote: true,
     defaultDelegate: false, // 実装は自分で進めてもらう（レビューは呼び出し側が回す）
-    defaultModel: envDefault(
-      "AGENT_EXEC_APPLY_MODEL",
-      "CODEX_MCP_APPLY_MODEL",
-      "gpt-5.6-luna",
-    ),
-    defaultEffort: envDefault(
-      "AGENT_EXEC_APPLY_EFFORT",
-      "CODEX_MCP_APPLY_EFFORT",
-      "max",
-    ),
+    baseModel: "gpt-5.6-luna",
+    baseEffort: "max",
   },
 };
 
-// 起動時に 1 度だけ解決し、結果を mode に焼く。実行のたびに判定しない。
-function adapterFor(mode) {
-  return mode.adapter;
+// 設定を変えられるのはこの 2 つ。status / result / runs は設定を持たない。
+const CONFIGURABLE_TOOLS = Object.keys(TOOL_MODES);
+
+function settingsFor(toolName, config) {
+  return resolveSettings(toolName, TOOL_MODES[toolName], config);
 }
 
 // 終端を観測済みか。terminal_seen は 5.0.0 からのキーで、turn_completed は
@@ -158,8 +147,8 @@ function terminalSeen(meta) {
 
 // model / reasoning_effort は意図的に含めない。呼び出し側の LLM に選ばせると、
 // 実運用では既定を無視して毎回同じモデルを指定してきた（25 run すべて gpt-6-astra。
-// apply の既定 gpt-5.6-luna は一度も発動しなかった）。どのモデルにいくら払うかは
-// 利用者が決めることなので、環境変数だけを入口にする。
+// apply の既定 gpt-5.6-luna は一度も発動しなかった）。埋める欄があれば LLM は埋める。
+// 変えたいときは `config` tool を呼ぶ——run のたびに勝手に起きる操作ではなくなる。
 const RUN_ARG_KEYS = [
   "prompt",
   "cwd",
@@ -170,73 +159,63 @@ const RUN_ARG_KEYS = [
 ];
 const APPLY_ARG_KEYS = [...RUN_ARG_KEYS, "scope"];
 
-// ---------------------------------------------------------------- 既定値の検査
+// ------------------------------------------------------------ 設定の解決と表示
 
-// モデルと effort は呼び出し側から渡せないので、不正な設定に気づける唯一の機会が
-// 起動時になる。effort は閉じた集合なので、不正な値とモデル非対応の値はここで捨てる
-// （以前は実行時に呼び出し側へエラーを返していたが、渡せなくなった以上ここで解決する）。
-// モデル slug は開いた集合（キャッシュが古いこともある）なので、警告だけ出して使う。
-function checkDefaults() {
-  for (const [toolName, mode] of Object.entries(TOOL_MODES)) {
-    // モデル名から起動する CLI を決める。ここで 1 度だけ解決して mode に焼く。
-    const resolved = resolveAdapter(mode.defaultModel);
-    mode.adapter = resolved.adapter;
-    mode.defaultModel = resolved.model;
-    if (!resolved.confident) {
-      process.stderr.write(
-        `warning: ${toolName} のモデル "${resolved.model}" はどの CLI にも紐づきません。` +
-          `${resolved.adapter.id} として起動します` +
-          `（意図が違う場合は "claude:${resolved.model}" のように接頭辞を付けてください）\n`,
-      );
-    }
-    const adapter = mode.adapter;
-    const known = adapter.knownModels();
-    if (mode.defaultEffort && !adapter.efforts.includes(mode.defaultEffort)) {
-      process.stderr.write(
-        `warning: ${toolName} の既定 reasoning_effort が不正なため無視します: ${mode.defaultEffort}\n`,
-      );
-      mode.defaultEffort = undefined;
-    }
-    if (
-      mode.defaultEffort &&
-      !adapter.supportsEffort(mode.defaultModel, mode.defaultEffort, known)
-    ) {
-      // 押し付けずに CLI 側の既定へ委ねる。ここで落とさないと毎回 run が失敗する。
-      process.stderr.write(
-        `warning: ${toolName} の既定モデル ${mode.defaultModel} は ` +
-          `reasoning_effort=${mode.defaultEffort} に対応していないため無視します` +
-          `（対応値: ${adapter.effortsFor(mode.defaultModel, known).join(", ")}）\n`,
-      );
-      mode.defaultEffort = undefined;
-    }
-    if (
-      mode.defaultModel &&
-      known.length > 0 &&
-      !known.some((m) => m.slug === mode.defaultModel)
-    ) {
-      process.stderr.write(
-        `warning: ${toolName} の既定モデル ${mode.defaultModel} は ${adapter.modelsCacheHint} に見当たりません` +
-          "（キャッシュが古いだけの可能性があるため、そのまま使います）\n",
-      );
-    }
-    // どの tool がどの CLI・どのモデルで走るかを毎回 stderr に出す。設定を変えた端末で
-    // 「反映されているか」を確かめる唯一の手がかりになる。
-    const sandbox = adapter.sandbox(mode.capability);
+// 起動時に「どの tool がどの CLI・どのモデルで走るか」を stderr に出す。
+//
+// これは確認手段ではなく、あくまでログ（/mcp のログに埋もれて誰も読まないことは
+// 実証済み）。設定を確かめたいときは `config` tool を呼ぶ。使えない値を捨てたことも
+// ここに出すが、同じ内容は config tool の応答にも必ず出る。
+function logSettings() {
+  for (const toolName of CONFIGURABLE_TOOLS) {
+    const { adapter, model, effort, notes } = settingsFor(toolName);
+    for (const note of notes) process.stderr.write(`warning: ${toolName}: ${note}\n`);
+    const sandbox = adapter.sandbox(TOOL_MODES[toolName].capability);
     process.stderr.write(
-      `${toolName}: model=${mode.defaultModel ?? "(CLI 既定)"} ` +
-        `effort=${mode.defaultEffort ?? "(CLI 既定)"} → ${adapter.bin()} ` +
+      `${toolName}: model=${model ?? "(CLI 既定)"} ` +
+        `effort=${effort ?? "(CLI 既定)"} → ${adapter.bin()} ` +
         `(${sandbox.label} / ${sandbox.enforcement})\n`,
     );
   }
 }
 
+// config tool の応答。読み出しも書き込みも同じものを返す（変更後に何が有効なのかを
+// 見せないと、設定した側は結局もう一度確かめることになる）。
+function formatSettings(config = readConfig()) {
+  const lines = [`${SERVER_NAME} ${SERVER_VERSION}`, `設定ファイル: ${CONFIG_PATH}`, ""];
+  for (const toolName of CONFIGURABLE_TOOLS) {
+    const mode = TOOL_MODES[toolName];
+    const { adapter, model, effort, fromConfig, notes } = settingsFor(toolName, config);
+    // config で上書きしているときだけ、戻す先（コード既定）も見せる。
+    const origin = (key, base) =>
+      fromConfig[key] ? `（config / コード既定は ${base ?? "なし"}）` : "（コード既定）";
+    const sandbox = adapter.sandbox(mode.capability);
+    lines.push(
+      `${toolName}: model=${model ?? "(CLI 既定)"}${origin("model", mode.baseModel)} ` +
+        `effort=${effort ?? "(CLI 既定)"}${origin("effort", mode.baseEffort)}`,
+      `  → ${adapter.bin()} (${adapter.label}) / ${sandbox.label} (${sandbox.enforcement})`,
+      `  選べる effort: ${adapter.effortsFor(model).join(", ") || adapter.efforts.join(", ")}`,
+    );
+    for (const extra of adapter.describeConfig?.() ?? []) lines.push(`  ${extra}`);
+    for (const note of notes) lines.push(`  ⚠ ${note}`);
+    lines.push("");
+  }
+  lines.push(
+    'model に "" を渡すと CLI 側の設定に委ね、null を渡すとコード既定に戻す。',
+    "許可コマンド（claude が承認なしに実行できるもの）は安全の宣言なのでコードにある。",
+  );
+  return lines.join("\n");
+}
+
 // ---------------------------------------------------------------- ツール定義
 
 // 呼び出し側はモデルを選べないが、「誰に相談しているか」は判断材料になるので明示する。
-function fixedModelNote(mode) {
-  const model = mode.defaultModel ?? `${adapterFor(mode).configHint} の設定`;
-  const effort = mode.defaultEffort ? `/ effort=${mode.defaultEffort}` : "";
-  return `モデルは ${model} ${effort} に固定されている（呼び出し側からは変更できない）。`;
+// tools/list のたびに解決するので、config を変えた後の一覧には新しい値が出る。
+function fixedModelNote(toolName) {
+  const { adapter, model, effort } = settingsFor(toolName);
+  const shown = model ?? `${adapter.configHint} の設定`;
+  const effortNote = effort ? `/ effort=${effort} ` : "";
+  return `モデルは ${shown} ${effortNote}で固定されている（run の引数では変えられない。変えるなら config）。`;
 }
 
 function runProperties(mode) {
@@ -288,7 +267,7 @@ function toolDefinitions() {
         "実装後のコードレビュー・再レビューに使う。resume_session_id を渡せば同じレビュー役に" +
         "段階をまたいで見せられる（前回の指摘が解消したかを同じ目で確認できる）。" +
         "ファイルは読めるが一切書き換えない。事実を集めるだけの調査なら、自分で読むほうが安い。" +
-        `${fixedModelNote(TOOL_MODES.consult)}`,
+        `${fixedModelNote("consult")}`,
       inputSchema: {
         type: "object",
         properties: {
@@ -310,7 +289,7 @@ function toolDefinitions() {
         "変更を戻せるようにするため cwd は git 管理下である必要がある。" +
         "応答には変更ファイル一覧と diff --stat が付く。" +
         "既定では「テストを実行し、コマンドと結果を報告に含める」よう指示する。" +
-        `${fixedModelNote(TOOL_MODES.apply)}`,
+        `${fixedModelNote("apply")}`,
       inputSchema: {
         type: "object",
         properties: {
@@ -392,6 +371,47 @@ function toolDefinitions() {
             description: "件数（既定 10）。",
           },
         },
+        required: [],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "config",
+      // 設定を MCP の外（環境変数・コード編集）に置いていたため、MCP しか使えない
+      // 呼び出し側からは設定を見ることも変えることもできなかった。ここに出すことで、
+      // README・道標・CLI フラグといった外側の仕組みが要らなくなる。
+      description:
+        "consult / apply が使うモデルと effort を確認・変更する。引数なしで呼ぶと" +
+        "現在の設定（どの CLI・どのモデル・どの effort・その値がどこから来たか）を返す。" +
+        "変更は次の run から有効で、サーバの再起動は要らない。" +
+        "**run のたびに呼ぶものではない**。モデルを切り替えたいと明示的に判断したときだけ使う。",
+      inputSchema: {
+        type: "object",
+        properties: Object.fromEntries(
+          CONFIGURABLE_TOOLS.map((toolName) => [
+            toolName,
+            {
+              type: "object",
+              description: `${toolName} の設定。`,
+              properties: {
+                model: {
+                  type: ["string", "null"],
+                  description:
+                    'モデル名。CLI はモデル名から決まる（"opus" なら claude、' +
+                    '"gpt-6-astra" なら codex。"claude:xxx" で明示もできる）。' +
+                    'null でコード既定に戻す。"" で CLI 側の設定に委ねる。',
+                },
+                effort: {
+                  type: ["string", "null"],
+                  description:
+                    "reasoning effort。モデルが対応していない値は拒否し、" +
+                    "対応値の一覧を返す。null でコード既定に戻す。",
+                },
+              },
+              additionalProperties: false,
+            },
+          ]),
+        ),
         required: [],
         additionalProperties: false,
       },
@@ -659,12 +679,10 @@ function startProgressPings(progressToken, record) {
 
 async function handleRun(toolName, params) {
   const mode = TOOL_MODES[toolName];
-  const adapter = adapterFor(mode);
+  // 設定は run ごとに解決する。config tool での変更が次の run から効くのはこのため
+  // （起動時に焼くと、設定を変えるたびにサーバの再起動が要る）。
+  const { adapter, model, effort, notes: settingNotes } = settingsFor(toolName);
   const sandbox = adapter.sandbox(mode.capability);
-  // モデルと effort は設定の値をそのまま使う。起動時の checkDefaults で健全性は
-  // 確認済みなので、ここでは検証しない。
-  const model = mode.defaultModel;
-  const effort = mode.defaultEffort;
   let prompt;
   let cwd;
   let timeoutMs;
@@ -903,7 +921,10 @@ async function handleRun(toolName, params) {
       ? `\nsession_id=${sessionId}（続きは resume_session_id に渡す）`
       : "") +
     (resumeSessionId ? `\n（${resumeSessionId} から継続）` : "") +
-    toolSwitchNote;
+    toolSwitchNote +
+    // 設定した値が使えずに捨てられたことは、run の応答にも出す。stderr だけだと
+    // 「設定したのに効いていない」に気づけない（それで数時間溶かした）。
+    settingNotes.map((note) => `\n⚠ 設定: ${note}（config で直せる）`).join("");
 
   if (outcome === "timeout") {
     const body = pickBody(runId, live.messages);
@@ -940,7 +961,8 @@ function formatDenials(meta) {
   return (
     "\n⚠ 次の操作は許可されていないため実行されませんでした:\n" +
     lines +
-    "\n  許可するには AGENT_EXEC_CLAUDE_ALLOWED_TOOLS に追加してください" +
+    "\n  許可するには claude.mjs の DEFAULT_ALLOWED_TOOLS" +
+    "（全端末）か AGENT_EXEC_CLAUDE_ALLOWED_TOOLS（その端末だけ）に追加してください" +
     '（例: "Bash(node --test*)"）。\n'
   );
 }
@@ -1330,6 +1352,54 @@ function handleRuns(params) {
   );
 }
 
+// 設定の確認と変更。引数が無ければ読み出しだけ。
+//
+// 不正な値はここで断る。捨てて既定に倒すのは run の経路だけにしてある（run は
+// 止めるより走らせたほうがよいが、設定は意図してやる操作なので、黙って別の値に
+// なるほうが困る）。断るときは対応値の一覧を添え、呼び出し側が自力で直せるようにする。
+function handleConfig(params) {
+  let args;
+  try {
+    args = toArgs(params);
+    validateArgKeys(args, CONFIGURABLE_TOOLS);
+  } catch (err) {
+    if (err instanceof InvalidArguments) return errorResult(err.message);
+    throw err;
+  }
+
+  const patch = {};
+  for (const toolName of CONFIGURABLE_TOOLS) {
+    const value = args[toolName];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "object" || Array.isArray(value)) {
+      return errorResult(`${toolName} はオブジェクトで指定してください（例: {"model": "opus"}）。`);
+    }
+    const unknown = Object.keys(value).filter((key) => !SETTING_KEYS.includes(key));
+    if (unknown.length > 0) {
+      return errorResult(
+        `${toolName} に未知のキーがあります: ${unknown.join(", ")}。` +
+          `使えるのは ${SETTING_KEYS.join(", ")} です。`,
+      );
+    }
+    for (const key of SETTING_KEYS) {
+      if (!(key in value)) continue;
+      if (value[key] !== null && typeof value[key] !== "string") {
+        return errorResult(`${toolName}.${key} は文字列か null で指定してください。`);
+      }
+    }
+    patch[toolName] = value;
+  }
+
+  if (Object.keys(patch).length === 0) return textResult(formatSettings());
+
+  for (const [toolName, value] of Object.entries(patch)) {
+    const reason = validatePatch(toolName, TOOL_MODES[toolName], value);
+    if (reason) return errorResult(`${reason}\n設定は変更していません。`);
+  }
+  const config = updateConfig(patch);
+  return textResult(`設定を変更しました。\n\n${formatSettings(config)}`);
+}
+
 // ---------------------------------------------------------------- MCP ハンドラ
 
 async function handleToolCall(params) {
@@ -1340,9 +1410,10 @@ async function handleToolCall(params) {
   if (name === "status") return handleStatus(params);
   if (name === "result") return handleResult(params);
   if (name === "runs") return handleRuns(params);
+  if (name === "config") return handleConfig(params);
   return errorResult(
     `未知のツールです: ${JSON.stringify(name)}。利用できるのは ` +
-      "consult, apply, status, result, runs です。",
+      "consult, apply, status, result, runs, config です。",
   );
 }
 
@@ -1456,7 +1527,7 @@ function main() {
     process.stderr.write(`unhandled rejection: ${String(reason)}\n`);
   });
 
-  checkDefaults();
+  logSettings();
   const reclaimed = reclaimOrphans();
   if (reclaimed.length > 0) {
     process.stderr.write(
