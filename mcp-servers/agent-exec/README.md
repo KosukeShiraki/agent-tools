@@ -610,7 +610,7 @@ POSIX は従来どおり `detached: true`。`killTree` が `process.kill(-pid)` 
 今どのコードが動いているかは `serverInfo.version` で分かる。挙動を変えたらここを上げる。
 
 ```
-現在: 7.1.0
+現在: 7.2.0
 ```
 
 **いまどの設定で動くかは `config` tool で分かる**（引数なしで呼ぶ）。コード既定か config
@@ -641,6 +641,7 @@ POSIX は従来どおり `detached: true`。`killTree` が `process.kill(-pid)` 
 | 7.0.0 | **モデル/effort の設定を `config` tool に集約**。環境変数 4 つ（`AGENT_EXEC_*_MODEL` / `_EFFORT`）と `--print-config` を廃止。設定は `config.json` に保存し、run ごとに解決するのでサーバ再起動が要らない。MCP しか使えない呼び出し側からも設定を扱える（[経緯](#どこで変えるか)） |
 | 7.0.1 | 外部レビューの 6 件を修正、あわせて run 起動ごとの PowerShell 呼び出しを 1 回減らした（自分の起動時刻は変わらないのにキャッシュしておらず、Windows で毎 run 440ms かかっていた）。(1) `config` の検査が `codex:` 接頭辞付きのモデル名をそのまま照合していたため、**受理した effort を run が黙って捨てて**いた（検査も解決後の名前を使う）。(2) `result` が生死不明の run を停止済みと同じ扱いにし、`isError` で「報告が記録されていません」と返していた（[生死判定は 3 値](#設計上の注意)が `status` でしか守られていなかった）。(3) プロセスの身元照会が「引けなかった」と「別プロセスだった」を同じ値に潰していたため、**照会の失敗がそのまま全 run の停止済み判定**になりえた（`markerVerdict` で 3 値にした）。(4) `config.json` の更新に読み書きの排他が無く、別サーバと同時に変えると**どちらも成功と答えて片方の変更が消えた**。一時ファイルも固定名で、応答と保存内容が食い違いえた（[ロックと一時ファイル名](#どこで変えるか)）。(5) 打ち切り中の run を、親 CLI の終了だけで手放していた。SIGTERM を無視する孫が残っている間に **repo 予約が空き**、その隙にサーバが終了すると SIGKILL の予約ごと消えて**孫が残り続けた**（meta は既に killed なので孤児回収も拾わない）。停止完了まで追跡を残す。(6) prune が**他のサーバの順番待ち run** を消しえた（pid がまだ無いので生死判定が必ず dead になる）。あわせて[排他と同時実行の範囲](#排他と同時実行の範囲)が 1 プロセス内に限られることを明記した |
 | 7.1.0 | **Windows で `detached` を外した**。コンソールを持たない子から codex を起こすと、codex が呼ぶ `git.exe` 等が毎回コンソールを確保して**ウィンドウが明滅**していた。`windowsHide` だけにすると隠しコンソールを持ち、孫が継承するので窓が出ない（実測 窓 1〜3 個 → 0 個）。代償として端末の Ctrl+C で run が落ちる（[理由](#windows-でコンソール窓を出さない)） |
+| 7.2.0 | **Windows では codex の囲いを `unelevated` にする**（`-c windows.sandbox="unelevated"`）。既定の elevated は囲いを用意するたびに同梱の `node_repl.exe` の ACL を書き換えようとし、その exe が動いていると（デスクトップアプリや codex 自身が起動した node_repl）`setup refresh had errors` で**全コマンドを断っていた**（codex 0.162.1・囲いの部品 0.158.0-alpha.2 で実測、`~/.codex/.sandbox/sandbox.<日付>.log` に `os error 32`）。`AGENT_EXEC_CODEX_WINDOWS_SANDBOX` で elevated に戻せる |
 
 ## 環境変数
 
@@ -655,6 +656,7 @@ POSIX は従来どおり `detached: true`。`killTree` が `process.kill(-pid)` 
 | `AGENT_EXEC_MAX_RUNS` | `50` | 保持する run の件数 |
 | `AGENT_EXEC_PRUNE_GRACE_MS` | `120000` | 完了直後の run を保護する時間 |
 | `AGENT_EXEC_PRUNE_DELAY_MS` | `10000` | run 完了から prune までの遅延 |
+| `AGENT_EXEC_CODEX_WINDOWS_SANDBOX` | `unelevated`（Windows のみ） | codex に渡す Windows の囲いの種類（`elevated` / `unelevated`）。空文字なら渡さず codex の設定に任せる。**`~/.codex/config.toml` の `[windows] sandbox` を上書きする**。**unelevated は elevated より囲いが弱い**（ネットワークの隔離が弱く、読み取り禁止のパスに対応しない。[OpenAI の資料](https://learn.chatgpt.com/docs/windows/windows-sandbox#configure-a-legacy-fallback)）。codex 側で elevated の不具合が直ったら `elevated` に戻すこと。7.2.0 の経緯は上の表 |
 | `AGENT_EXEC_HARD_LIMIT_MS` | `7200000` | 1 run の絶対上限（2時間）。超えたら強制的に打ち切る |
 
 **5.0.0 で `CODEX_MCP_*` を `AGENT_EXEC_*` に改名した。** 旧名も読むが、読んだときは

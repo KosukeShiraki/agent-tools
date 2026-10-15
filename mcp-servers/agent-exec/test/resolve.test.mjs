@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import claudeBackend from "../lib/backends/claude.mjs";
-import codexBackend from "../lib/backends/codex.mjs";
+import codexBackend, { windowsSandbox } from "../lib/backends/codex.mjs";
 import { adapterById, resolveAdapter } from "../lib/backends/index.mjs";
 import {
   currentProcessStartTime,
@@ -392,6 +392,65 @@ describe("codex アダプタ（純関数の側）", () => {
     assert.equal(d.completed, true);
     assert.equal(d.finalMessage, undefined);
   });
+});
+
+// Windows の囲いの種類。elevated は node_repl.exe が動いていると準備に失敗するので、
+// 既定で unelevated を渡す（環境変数で elevated に戻せ、空なら渡さない）。
+describe("codex の Windows の囲いの種類", () => {
+  const KEY = "AGENT_EXEC_CODEX_WINDOWS_SANDBOX";
+  const base = {
+    runId: "20261015-120000-000-wsbx",
+    runDir: "/runs/20261015-120000-000-wsbx",
+    capability: "write",
+    cwd: "/repo",
+  };
+  function withEnv(value, fn) {
+    const saved = process.env[KEY];
+    if (value === undefined) delete process.env[KEY];
+    else process.env[KEY] = value;
+    try {
+      return fn();
+    } finally {
+      if (saved === undefined) delete process.env[KEY];
+      else process.env[KEY] = saved;
+    }
+  }
+
+  it("Windows では既定で unelevated を渡す", () =>
+    withEnv(undefined, () => {
+      const { argv } = codexBackend.buildLaunch({ ...base, platform: "win32" });
+      assert.ok(argv.includes('windows.sandbox="unelevated"'), argv.join(" "));
+    }));
+
+  it("resume でも渡す", () =>
+    withEnv(undefined, () => {
+      const { argv } = codexBackend.buildLaunch({
+        ...base,
+        platform: "win32",
+        resumeSessionId: "01a13dc1-638c-7f50-9073-1667c53c640f",
+      });
+      assert.ok(argv.includes('windows.sandbox="unelevated"'), argv.join(" "));
+    }));
+
+  it("Windows 以外では渡さない", () =>
+    withEnv(undefined, () => {
+      const { argv } = codexBackend.buildLaunch({ ...base, platform: "linux" });
+      assert.ok(!argv.some((a) => a.startsWith("windows.sandbox")), argv.join(" "));
+    }));
+
+  it("環境変数で elevated に戻せ、空なら渡さない", () => {
+    withEnv("elevated", () => assert.equal(windowsSandbox("win32"), "elevated"));
+    withEnv("", () => assert.equal(windowsSandbox("win32"), undefined));
+    withEnv("", () => {
+      const { argv } = codexBackend.buildLaunch({ ...base, platform: "win32" });
+      assert.ok(!argv.some((a) => a.startsWith("windows.sandbox")), argv.join(" "));
+    });
+  });
+
+  it("使えない値は既定に倒す（argv に任意の文字列を入れない）", () =>
+    withEnv('x" -c sandbox_mode="danger-full-access', () =>
+      assert.equal(windowsSandbox("win32"), "unelevated"),
+    ));
 });
 
 // 設定の重ね方（コード既定 → config.json）。ファイルには触らず、config を直接渡す。

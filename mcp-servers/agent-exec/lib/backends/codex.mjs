@@ -12,6 +12,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { readEnv } from "../env.mjs";
+
 const EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
 // capability（読み取り専用 / 書ける）を codex の sandbox 値へ翻訳する。
@@ -20,6 +22,29 @@ const SANDBOX = {
   read: { label: "read-only", enforcement: "os-sandbox" },
   write: { label: "workspace-write", enforcement: "os-sandbox" },
 };
+
+// Windows の囲いの種類。codex の既定の elevated は、囲いを用意するたびに同梱の node_repl.exe の
+// ACL を書き換えようとし、その exe が動いていると（デスクトップアプリや codex 自身が起動した
+// node_repl）「setup refresh had errors」で全コマンドを断る（codex 0.162.1・囲いの部品
+// 0.158.0-alpha.2 で実測。2026-10-15）。unelevated（制限トークン）はその準備を通らない。
+// AGENT_EXEC_CODEX_WINDOWS_SANDBOX で変えられる（"elevated" で codex の既定へ、空で指定しない）。
+const WINDOWS_SANDBOXES = ["elevated", "unelevated"];
+const DEFAULT_WINDOWS_SANDBOX = "unelevated";
+
+export function windowsSandbox(platform = process.platform) {
+  if (platform !== "win32") return undefined;
+  const raw = readEnv("AGENT_EXEC_CODEX_WINDOWS_SANDBOX");
+  if (raw === undefined) return DEFAULT_WINDOWS_SANDBOX;
+  const value = raw.trim();
+  if (value === "") return undefined;
+  if (WINDOWS_SANDBOXES.includes(value)) return value;
+  process.stderr.write(
+    `warning: AGENT_EXEC_CODEX_WINDOWS_SANDBOX=${JSON.stringify(raw)} は使えない値です ` +
+      `（${WINDOWS_SANDBOXES.join(" / ")} か空）。${DEFAULT_WINDOWS_SANDBOX} を使います
+`,
+  );
+  return DEFAULT_WINDOWS_SANDBOX;
+}
 
 function codexHome() {
   return process.env.CODEX_HOME || join(homedir(), ".codex");
@@ -91,7 +116,17 @@ export default {
   modelsCacheHint: "models_cache.json",
 
   // 純関数。argv / 追加 env / argv マーカーを返す。
-  buildLaunch({ runId, capability, cwd, model, effort, resumeSessionId, runDir, skipGitRepoCheck }) {
+  buildLaunch({
+    runId,
+    capability,
+    cwd,
+    model,
+    effort,
+    resumeSessionId,
+    runDir,
+    skipGitRepoCheck,
+    platform = process.platform,
+  }) {
     const sandbox = this.sandbox(capability).label;
     const lastMessagePath = join(runDir, "last-message.txt");
     const argv = ["exec"];
@@ -108,6 +143,8 @@ export default {
     if (model) argv.push("-m", model);
     // model / effort / sandbox はいずれも検証済みの値のみ埋め込む。
     if (effort) argv.push("-c", `model_reasoning_effort="${effort}"`);
+    const windows = windowsSandbox(platform);
+    if (windows) argv.push("-c", `windows.sandbox="${windows}"`);
     return {
       argv,
       env: {},
